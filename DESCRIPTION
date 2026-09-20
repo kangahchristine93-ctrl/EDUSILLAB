@@ -1,0 +1,23 @@
+Package: EDUSILLAB
+Type: Shiny
+Title: EDUSILLAB - Systeme d'information de laboratoire pedagogique
+Version: 34.0.0
+Authors@R: person("CCNB", "Campus de Dieppe", role = c("aut", "cre"), email = "admin@edusillab.local")
+Description: Portail pedagogique Shiny pour la gestion des patients, demandes,
+    specimens, etiquettes, reception, historique, repertoire d'analyses,
+    utilisateurs, permissions et configuration du portail.
+License: file LICENSE
+Encoding: UTF-8
+Depends:
+    R (>= 4.4.0)
+Imports:
+    shiny,
+    DBI,
+    RSQLite,
+    DT,
+    readxl,
+    jsonlite
+Suggests:
+    readtext,
+    writexl,
+    rsconnect
