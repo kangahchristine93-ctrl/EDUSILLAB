@@ -1,3 +1,5 @@
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0) y else x
+
 # EDUSILLAB - v35 POSIT CLOUD CORRIGÉ - logo CCNB + icônes + répertoire analyses + manifest
 library(shiny)
 library(DBI)
@@ -2277,7 +2279,7 @@ ui <- fluidPage(
       }
 
       /* ===== EDUSILLAB v42 - Connexion visuelle fidele a la maquette ===== */
-      .login-modern { display:none !important; }
+      .login-modern { display:block !important; }
       .edu-login-screen {
         position:relative; width:100vw; height:100vh; min-height:720px; overflow:hidden;
         background:#eef6fd url('login_v42_reference.png') center center / 100% 100% no-repeat;
@@ -2323,6 +2325,45 @@ ui <- fluidPage(
       @media (max-width:1100px), (max-height:760px) {
         .edu-login-screen { min-height:620px; overflow:auto; }
       }
+
+      /* ===== EDUSILLAB - Connexion dynamique et fonctionnelle ===== */
+      .edu-login-screen {
+        position:fixed; inset:0; z-index:9999; overflow:auto;
+        min-height:100vh; background:linear-gradient(135deg,#eef6fd 0%,#f8fbff 55%,#edf4fb 100%);
+        font-family:Arial, Helvetica, sans-serif; display:grid; grid-template-columns:1.05fr .95fr;
+      }
+      .edu-login-brand {
+        position:relative; min-height:100vh; padding:64px 7%; color:white; overflow:hidden;
+        background:linear-gradient(145deg,rgba(8,48,87,.94),rgba(17,83,139,.90)),url('hero_ccnb_dieppe.png') center/cover no-repeat;
+        display:flex; flex-direction:column; justify-content:center;
+      }
+      .edu-login-brand:after { content:''; position:absolute; right:-110px; bottom:-130px; width:330px; height:330px; background:#f58220; transform:rotate(45deg); opacity:.92; }
+      .edu-login-brand-inner { position:relative; z-index:2; max-width:680px; }
+      .edu-login-brand-logo { max-width:330px; max-height:115px; object-fit:contain; margin-bottom:44px; }
+      .edu-login-brand h1 { margin:0; font-size:66px; line-height:1; font-weight:900; letter-spacing:-1px; }
+      .edu-login-brand h1 span { color:#f58220; }
+      .edu-login-brand h2 { margin:18px 0 10px; font-size:26px; font-weight:600; }
+      .edu-login-brand p { margin:0; font-size:20px; opacity:.94; }
+      .edu-login-panel { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:46px; }
+      .edu-login-card { width:min(100%,520px); background:white; border:1px solid #dce6f0; border-radius:22px; padding:38px 42px; box-shadow:0 22px 60px rgba(20,52,86,.15); }
+      .edu-login-card h2 { margin:0 0 8px; color:#103f70; font-size:30px; font-weight:800; }
+      .edu-login-card .login-subtitle { color:#65788d; margin-bottom:28px; }
+      .edu-login-card .form-group { position:relative; margin-bottom:20px; }
+      .edu-login-card label { display:block !important; color:#24435f; font-size:14px; font-weight:700; margin-bottom:7px; }
+      .edu-login-card .form-control { height:52px; border:1px solid #cbd8e6 !important; border-radius:10px; background:white !important; color:#173a5e; font-size:16px; padding:0 14px; }
+      .edu-login-card .form-control::placeholder { color:#91a0af; }
+      .edu-password-wrap { position:relative; }
+      .edu-password-wrap .form-group { margin-bottom:0; }
+      .edu-password-eye { position:absolute; right:10px; top:34px; z-index:5; border:0; background:transparent; color:#315a7d; font-size:20px; cursor:pointer; padding:5px 8px; }
+      .edu-login-options { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:14px 0 22px; }
+      .edu-login-options .checkbox { margin:0; color:#425d76; }
+      .edu-login-forgot-live { color:#1769aa; font-weight:600; text-decoration:none; cursor:pointer; }
+      .edu-login-forgot-live:hover { text-decoration:underline; }
+      .edu-login-card .btn-primary { width:100%; height:52px; border-radius:10px; background:#1769aa; border-color:#1769aa; font-size:17px; font-weight:800; margin:0; }
+      .edu-login-card #message_connexion { margin-top:16px; text-align:center; }
+      .edu-login-security { margin-top:24px; padding-top:18px; border-top:1px solid #e5edf5; color:#718296; font-size:12px; text-align:center; }
+      .login-modern { display:block !important; }
+      @media(max-width:900px){ .edu-login-screen{grid-template-columns:1fr}.edu-login-brand{min-height:300px;padding:42px 28px}.edu-login-brand h1{font-size:48px}.edu-login-panel{min-height:auto;padding:30px 18px}.edu-login-card{padding:30px 24px} }
 
       .user-box {
         background:#eef3f8;
@@ -2586,9 +2627,10 @@ ui <- fluidPage(
       .portal-topbar-title small { color:#e8f0f8 !important; font-size:16px !important; }
       .portal-topbar-meta { color:#fff !important; }
       .portal-content { padding:0 !important; background:#f4f7fb !important; }
-      .edu-home-hero { min-height:470px; display:grid; grid-template-columns:1.05fr 1fr; align-items:center; gap:42px; padding:42px 6%; position:relative; overflow:hidden; background:linear-gradient(100deg,rgba(247,251,255,.97),rgba(247,251,255,.90)),url('hero_ccnb_dieppe.png') center/cover no-repeat; border-bottom:1px solid #dce5ef; }
+      .edu-home-hero { min-height:470px; display:grid; grid-template-columns:1.05fr 1fr; align-items:center; gap:42px; padding:42px 6%; position:relative; overflow:hidden; background:linear-gradient(105deg,rgba(255,255,255,.96) 0%,rgba(239,247,255,.90) 48%,rgba(255,255,255,.94) 100%); border-bottom:1px solid #dce5ef; }
       .edu-home-hero:after { content:''; position:absolute; right:-70px; bottom:-120px; width:280px; height:280px; background:#f58220; transform:rotate(45deg); opacity:.85; }
-      .edu-hero-logo { position:relative; z-index:1; display:flex; justify-content:center; }
+      .edu-hero-copy { position:relative; z-index:2; }
+      .edu-hero-logo { position:relative; z-index:2; display:flex; justify-content:center; }
       .edu-hero-logo img { width:min(100%,650px); max-height:290px; object-fit:contain; filter:drop-shadow(0 8px 18px rgba(10,42,72,.08)); }
       .edu-hero-copy { position:relative; z-index:1; color:#0c3159; }
       .edu-welcome { font-size:34px; font-weight:750; line-height:1.05; }
@@ -2666,8 +2708,8 @@ ui <- fluidPage(
       .topbar-user { white-space:nowrap; }
       .topbar-logout { border:0; background:transparent; color:#fff; font-size:18px; padding:10px 0; cursor:pointer; white-space:nowrap; }
       .portal-content { padding:0 !important; min-height:calc(100vh - 180px) !important; background:linear-gradient(180deg,#f8fbfe,#fff) !important; }
-      .edu-home-hero { min-height:560px !important; height:560px !important; grid-template-columns:1.08fr .92fr !important; gap:28px !important; padding:36px 5% 125px !important; background:linear-gradient(100deg,rgba(248,252,255,.78),rgba(248,252,255,.67)),url('hero_ccnb_dieppe.png') center/cover no-repeat !important; border-bottom:0 !important; }
-      .edu-home-hero:before { content:''; position:absolute; left:0; bottom:0; width:170px; height:210px; background:rgba(49,128,196,.18); clip-path:polygon(0 0,100% 100%,0 100%); }
+      .edu-home-hero { min-height:560px !important; height:560px !important; grid-template-columns:1.08fr .92fr !important; gap:28px !important; padding:36px 5% 125px !important; background:linear-gradient(105deg,rgba(255,255,255,.95) 0%,rgba(233,244,254,.88) 48%,rgba(255,255,255,.93) 100%) !important; border-bottom:0 !important; }
+      .edu-home-hero:before { content:''; position:absolute; inset:0; width:auto; height:auto; background:radial-gradient(circle at 16% 42%,rgba(18,112,183,.13) 0 5%,transparent 6%),radial-gradient(circle at 35% 70%,rgba(245,130,32,.10) 0 4%,transparent 5%),linear-gradient(90deg,transparent 0 8%,rgba(24,104,169,.06) 8% 10%,transparent 10% 22%,rgba(24,104,169,.05) 22% 25%,transparent 25% 100%); filter:blur(1px); pointer-events:none; }
       .edu-home-hero:after { right:-82px !important; bottom:-112px !important; width:250px !important; height:250px !important; background:#f58220 !important; opacity:.78 !important; }
       .edu-hero-logo img { width:min(100%,590px) !important; max-height:330px !important; filter:none !important; }
       .edu-hero-copy { padding-right:10px; }
@@ -2677,7 +2719,7 @@ ui <- fluidPage(
       .edu-subtitle,.edu-campus { font-size:18px !important; color:#173a62 !important; }
       .edu-rule { width:80px !important; height:4px !important; margin:18px 0 !important; background:#ff681e !important; }
       .edu-tagline { font-family:Georgia,'Times New Roman',serif !important; font-style:italic !important; font-size:22px !important; color:#0b3b70 !important; white-space:nowrap; }
-      .edu-home-actions { grid-template-columns:repeat(4,minmax(0,1fr)) !important; gap:14px !important; padding:0 18px 24px !important; margin-top:-165px !important; }
+      .edu-home-actions { grid-template-columns:repeat(5,minmax(0,1fr)) !important; gap:14px !important; padding:0 18px 24px !important; margin-top:-165px !important; }
       .edu-action-card { min-height:255px !important; border-radius:18px !important; padding:22px 16px 26px !important; box-shadow:0 6px 20px rgba(0,0,0,.10) !important; border:1px solid #e6edf5 !important; }
       .edu-action-icon { width:90px !important; height:90px !important; margin-bottom:18px !important; }
       .edu-action-icon img { width:58px !important; height:58px !important; }
@@ -2693,6 +2735,145 @@ ui <- fluidPage(
       @media(max-width:1200px){ .portal-topbar-logo{width:220px}.portal-topbar-title{font-size:30px !important}.portal-topbar-meta{gap:18px !important}.edu-title{font-size:54px !important}.edu-tagline{white-space:normal}.edu-home-actions{grid-template-columns:repeat(2,1fr) !important;margin-top:-90px !important}.edu-home-hero{height:auto !important;min-height:600px !important} }
       @media(max-width:900px){ .portal-main{margin-left:0 !important}.portal-sidebar{width:100% !important;position:relative !important;height:auto !important}.portal-topbar{height:auto !important;min-height:120px !important;flex-wrap:wrap !important}.portal-topbar-logo{width:190px}.edu-home-hero{grid-template-columns:1fr !important;text-align:center !important;padding-bottom:60px !important}.edu-rule{margin:18px auto !important}.edu-home-actions{margin-top:0 !important}.portal-footer{height:auto !important;min-height:75px !important;flex-wrap:wrap !important;gap:10px !important;padding:16px 20px !important} }
       @media(max-width:650px){ .edu-home-actions{grid-template-columns:1fr !important}.portal-topbar-meta{width:100%;justify-content:space-between}.portal-topbar-title small{font-size:14px !important}.edu-title{font-size:44px !important}.edu-welcome{font-size:30px !important} }
+
+      /* ======================================================
+         EDUSILLAB v49 - restauration repertoire et liste clients
+         Aucun texte utilisateur n'est integre dans une image.
+         ====================================================== */
+      .portal-content {
+        background:#f4f8fc !important;
+      }
+      .edu-home-hero {
+        position:relative !important;
+        display:grid !important;
+        grid-template-columns:1.15fr 1fr !important;
+        align-items:center !important;
+        gap:26px !important;
+        min-height:720px !important;
+        height:auto !important;
+        padding:46px 5.5% 80px !important;
+        overflow:hidden !important;
+        background:
+          linear-gradient(90deg,rgba(247,251,255,.88) 0%,rgba(247,251,255,.72) 48%,rgba(255,255,255,.88) 100%),
+          url('hero_ccnb_dieppe.png') center/cover no-repeat !important;
+        border:0 !important;
+      }
+      .edu-home-hero:before {
+        content:'' !important; position:absolute !important; inset:0 !important;
+        background:linear-gradient(135deg,rgba(33,122,194,.08),transparent 34%,transparent 72%,rgba(255,116,22,.05)) !important;
+        pointer-events:none !important;
+      }
+      .edu-home-hero:after {
+        content:'' !important; position:absolute !important; right:-90px !important; bottom:-115px !important;
+        width:260px !important; height:260px !important; transform:rotate(45deg) !important;
+        background:#f58220 !important; opacity:.78 !important; pointer-events:none !important;
+      }
+      .edu-hero-logo {
+        grid-column:1 !important; position:relative !important; z-index:2 !important;
+        display:flex !important; align-items:center !important; justify-content:center !important;
+        order:1 !important;
+      }
+      .edu-hero-logo img {
+        width:min(100%,720px) !important; max-height:430px !important; object-fit:contain !important;
+        filter:none !important; background:transparent !important;
+      }
+      .edu-hero-copy {
+        grid-column:2 !important; position:relative !important; z-index:2 !important; order:2 !important;
+        padding:0 10px 0 20px !important; text-align:left !important;
+      }
+      .edu-welcome { font-size:48px !important; line-height:1.03 !important; font-weight:900 !important; color:#083f79 !important; margin:0 !important; }
+      .edu-title { font-size:76px !important; line-height:.98 !important; font-weight:900 !important; color:#083f79 !important; margin:10px 0 18px !important; letter-spacing:-2px !important; }
+      .edu-orange { color:#ff5a00 !important; }
+      .edu-subtitle,.edu-campus { font-size:21px !important; line-height:1.45 !important; color:#173a62 !important; margin-top:4px !important; }
+      .edu-rule { width:105px !important; height:6px !important; background:#ff681e !important; margin:22px 0 24px !important; }
+      .edu-tagline { font-family:Georgia,'Times New Roman',serif !important; font-style:italic !important; font-size:25px !important; color:#0b3b70 !important; white-space:normal !important; }
+      .edu-home-actions {
+        position:relative !important; z-index:4 !important; margin:0 !important; padding:28px 28px 38px !important;
+        grid-template-columns:repeat(5,minmax(0,1fr)) !important; gap:18px !important; background:#f4f8fc !important;
+      }
+      @media(max-width:1200px){
+        .edu-home-hero{min-height:650px !important;grid-template-columns:1fr 1fr !important;padding:35px 4% 60px !important}
+        .edu-welcome{font-size:38px !important}.edu-title{font-size:60px !important}.edu-tagline{font-size:21px !important}
+        .edu-home-actions{grid-template-columns:repeat(2,1fr) !important}
+      }
+      @media(max-width:850px){
+        .edu-home-hero{grid-template-columns:1fr !important;min-height:auto !important;padding:35px 24px 50px !important;text-align:center !important}
+        .edu-hero-logo,.edu-hero-copy{grid-column:1 !important}.edu-hero-logo{order:1 !important}.edu-hero-copy{order:2 !important;text-align:center !important;padding:0 !important}
+        .edu-rule{margin:20px auto !important}.edu-hero-logo img{max-height:270px !important}.edu-title{font-size:52px !important}
+      }
+      @media(max-width:600px){.edu-home-actions{grid-template-columns:1fr !important}.edu-welcome{font-size:31px !important}.edu-title{font-size:44px !important}}
+
+      /* ======================================================
+         EDUSILLAB v50 - accueil de reference, mais dynamique
+         Le fond est visuel; textes, navigation et utilisateur restent HTML/Shiny.
+         ====================================================== */
+      .portal-content { background:#eef4fa !important; }
+      .edu-home-hero{
+        position:relative !important;
+        display:grid !important;
+        grid-template-columns:58% 42% !important;
+        align-items:center !important;
+        gap:0 !important;
+        min-height:calc(100vh - 158px) !important;
+        height:auto !important;
+        padding:34px 3.2% 38px 1.5% !important;
+        overflow:hidden !important;
+        background:
+          linear-gradient(90deg,rgba(255,255,255,.80) 0%,rgba(246,251,255,.62) 46%,rgba(255,255,255,.76) 100%),
+          url('hero_ccnb_dieppe.png') center/cover no-repeat !important;
+        border:0 !important;
+      }
+      .edu-home-hero:before{
+        content:'' !important;
+        position:absolute !important; inset:0 !important;
+        background:linear-gradient(132deg,rgba(255,255,255,.16) 0 63%,rgba(223,239,252,.28) 63% 88%,rgba(255,255,255,.12) 88%) !important;
+        pointer-events:none !important;
+      }
+      .edu-home-hero:after{
+        content:'' !important;
+        position:absolute !important; right:-105px !important; bottom:-125px !important;
+        width:260px !important; height:260px !important;
+        transform:rotate(45deg) !important;
+        background:#f58220 !important; opacity:.82 !important; pointer-events:none !important;
+      }
+      .edu-hero-logo{
+        grid-column:1 !important; grid-row:1 !important;
+        position:relative !important; z-index:2 !important;
+        display:flex !important; align-items:center !important; justify-content:center !important;
+        padding:0 2% 0 0 !important;
+      }
+      .edu-hero-logo img{
+        width:min(100%,760px) !important;
+        max-height:500px !important;
+        object-fit:contain !important;
+        background:transparent !important;
+        filter:none !important;
+      }
+      .edu-hero-copy{
+        grid-column:2 !important; grid-row:1 !important;
+        position:relative !important; z-index:2 !important;
+        padding:0 3% 0 1% !important;
+        text-align:left !important;
+      }
+      .edu-welcome{font-size:50px !important;line-height:1.02 !important;font-weight:900 !important;color:#073e78 !important;margin:0 0 8px !important;}
+      .edu-title{font-size:78px !important;line-height:.96 !important;font-weight:900 !important;color:#073e78 !important;margin:0 0 22px !important;letter-spacing:-2px !important;white-space:nowrap !important;}
+      .edu-orange{color:#ff5a00 !important;}
+      .edu-subtitle,.edu-campus{font-size:21px !important;line-height:1.45 !important;color:#173a62 !important;margin:3px 0 !important;}
+      .edu-rule{width:92px !important;height:6px !important;background:#ff681e !important;margin:22px 0 25px !important;}
+      .edu-tagline{font-family:Georgia,'Times New Roman',serif !important;font-style:italic !important;font-size:25px !important;line-height:1.35 !important;color:#0b3b70 !important;}
+      /* La reference n'affiche pas de cartes sur le visuel d'accueil. Les modules restent accessibles dans le menu lateral. */
+      .edu-home-actions{display:none !important;}
+      @media(max-width:1200px){
+        .edu-home-hero{grid-template-columns:55% 45% !important;min-height:650px !important;padding:30px 3% !important;}
+        .edu-welcome{font-size:39px !important}.edu-title{font-size:61px !important}.edu-tagline{font-size:21px !important}
+        .edu-hero-logo img{max-height:390px !important}
+      }
+      @media(max-width:850px){
+        .edu-home-hero{grid-template-columns:1fr !important;min-height:auto !important;padding:30px 22px 50px !important;text-align:center !important;}
+        .edu-hero-logo{grid-column:1 !important;grid-row:1 !important;padding:0 !important}
+        .edu-hero-copy{grid-column:1 !important;grid-row:2 !important;text-align:center !important;padding:12px 0 0 !important}
+        .edu-rule{margin:20px auto 24px !important}.edu-hero-logo img{max-height:280px !important}.edu-title{font-size:52px !important}
+      }
 
       /* ======================================================
          EDUSILLAB v40 - accueil visuel exact de la reference
@@ -2739,8 +2920,68 @@ ui <- fluidPage(
         .portal-topbar { position:relative; }
         .portal-content { padding:14px; }
       }
+
+      /* ======================================================
+         EDUSILLAB v51 - suppression du double décalage latéral
+         Le sidebar est déjà une colonne de .portal-shell :
+         aucune marge gauche supplémentaire sur .portal-main.
+         ====================================================== */
+      .portal-shell {
+        grid-template-columns:300px minmax(0,1fr) !important;
+        column-gap:0 !important;
+      }
+      .portal-sidebar {
+        width:300px !important;
+        margin:0 !important;
+        box-sizing:border-box !important;
+      }
+      .portal-main {
+        margin-left:0 !important;
+        width:100% !important;
+        min-width:0 !important;
+      }
+      @media (max-width:900px) {
+        .portal-shell { grid-template-columns:220px minmax(0,1fr) !important; }
+        .portal-sidebar { width:220px !important; }
+        .portal-main { margin-left:0 !important; width:100% !important; }
+      }
+      @media (max-width:700px) {
+        .portal-shell { display:block !important; }
+        .portal-sidebar { width:100% !important; }
+        .portal-main { margin-left:0 !important; width:100% !important; }
+      }
     ")),
     tags$script(HTML("
+      // Connexion : affichage du mot de passe et mémorisation de l'identifiant uniquement.
+      $(document).on('click', '#toggle_login_password', function(e) {
+        e.preventDefault();
+        var el = document.getElementById('mot_de_passe');
+        if (el) el.type = (el.type === 'password') ? 'text' : 'password';
+      });
+      $(document).on('change', '#se_souvenir', function() {
+        if (!this.checked) localStorage.removeItem('edusillab_identifiant');
+      });
+      $(document).on('click', '#connexion', function() {
+        var remember = document.getElementById('se_souvenir');
+        var ident = document.getElementById('identifiant');
+        if (remember && remember.checked && ident) localStorage.setItem('edusillab_identifiant', ident.value || '');
+        else localStorage.removeItem('edusillab_identifiant');
+      });
+      $(document).on('shiny:value', function(event) {
+        if (event.name === 'page') {
+          setTimeout(function() {
+            var saved = localStorage.getItem('edusillab_identifiant');
+            var ident = document.getElementById('identifiant');
+            var remember = document.getElementById('se_souvenir');
+            if (saved && ident && !ident.value) {
+              ident.value = saved;
+              ident.dispatchEvent(new Event('change', {bubbles:true}));
+              if (remember) remember.checked = true;
+            }
+          }, 100);
+        }
+      });
+
       $(document).on('keydown', '#req_order_mnemo', function(e) {
         if (e.key === 'Enter' || e.keyCode === 13) {
           e.preventDefault();
@@ -2793,6 +3034,22 @@ ui <- fluidPage(
 
   uiOutput("page")
 )
+
+# ============================================================
+# NUMERO DE DOSSIER PATIENT - GENERATION AUTOMATIQUE
+# ============================================================
+
+generer_numero_dossier_patient <- function(con) {
+  repeat {
+    numero <- sprintf("%06d", sample.int(900000L, 1L) + 99999L)
+    n <- DBI::dbGetQuery(
+      con,
+      "SELECT COUNT(*) AS n FROM patients WHERE numero_dossier = ?",
+      params = list(numero)
+    )$n[1]
+    if (length(n) == 1L && !is.na(n) && as.integer(n) == 0L) return(numero)
+  }
+}
 
 # ============================================================
 # 3B. IMPORT / EXPORT DES CLIENTS (PATIENTS)
@@ -2968,11 +3225,14 @@ mettre_a_jour_clients_importes <- function(con, tab) {
     dossier <- trimws(ifelse(is.na(r$numero_dossier), "", r$numero_dossier))
     medicare <- trimws(ifelse(is.na(r$medicare), "", r$medicare))
 
-    # Il faut au moins un identifiant stable pour éviter de créer des doublons.
-    if (!nzchar(dossier) && !nzchar(medicare)) {
-      ignores <- ignores + 1L
-      erreurs <- c(erreurs, paste0("Ligne ", i, " ignorée : dossier et Medicare absents."))
-      next
+    # Le Medicare est facultatif. Tout patient doit toutefois avoir un dossier.
+    # Si le dossier est absent, EDUSILLAB en génère un automatiquement,
+    # y compris lorsque le Medicare est également absent.
+    dossier_genere <- FALSE
+    if (!nzchar(dossier)) {
+      dossier <- generer_numero_dossier_patient(con)
+      r$numero_dossier <- dossier
+      dossier_genere <- TRUE
     }
 
     existants <- DBI::dbGetQuery(
@@ -3365,12 +3625,15 @@ server <- function(input, output, session) {
           initiales,matricule,action,details
         ) VALUES (?,?,?,?,?,?,?,?)
         ",
-        params=list(
-          patient_id,requisition_id,specimen_id,
-          if (is.null(u)) NULL else u$id,
-          if (is.null(u)) "" else u$initiales,
-          if (is.null(u)) "" else u$matricule,
-          action,details
+        params = list(
+          if (is.null(patient_id) || length(patient_id) == 0 || is.na(patient_id[1])) NA_integer_ else as.integer(patient_id[1]),
+          if (is.null(requisition_id) || length(requisition_id) == 0 || is.na(requisition_id[1])) NA_integer_ else as.integer(requisition_id[1]),
+          if (is.null(specimen_id) || length(specimen_id) == 0 || is.na(specimen_id[1])) NA_integer_ else as.integer(specimen_id[1]),
+          if (is.null(u) || is.null(u$id) || length(u$id) == 0 || is.na(u$id[1])) NA_integer_ else as.integer(u$id[1]),
+          if (is.null(u) || is.null(u$initiales) || length(u$initiales) == 0 || is.na(u$initiales[1])) "" else as.character(u$initiales[1]),
+          if (is.null(u) || is.null(u$matricule) || length(u$matricule) == 0 || is.na(u$matricule[1])) "" else as.character(u$matricule[1]),
+          if (is.null(action) || length(action) == 0 || is.na(action[1])) "" else as.character(action[1]),
+          if (is.null(details) || length(details) == 0 || is.na(details[1])) "" else as.character(details[1])
         )
       )
 
@@ -3503,14 +3766,38 @@ server <- function(input, output, session) {
         div(
           class = "edu-login-screen",
           div(
-            class = "edu-login-live",
-            tags$span(class="login-user-icon", "●"),
-            tags$span(class="login-lock-icon", "▣"),
-            textInput("identifiant", NULL, placeholder="Identifiant"),
-            passwordInput("mot_de_passe", NULL, placeholder="Mot de passe"),
-            actionButton("connexion", "Se connecter", class="btn-primary"),
-            tags$a(class="edu-login-forgot", href="#", onclick="return false;", "Mot de passe oublié ?"),
-            uiOutput("message_connexion")
+            class = "edu-login-brand",
+            div(
+              class = "edu-login-brand-inner",
+              tags$img(class="edu-login-brand-logo", src=logo_portail, alt="CCNB Laboratoire Dieppe"),
+              h1("EDUSIL", tags$span("LAB")),
+              h2("Système d’information de laboratoire pédagogique"),
+              p("CCNB — Campus de Dieppe"),
+              br(),
+              p(tags$em("Apprendre aujourd'hui pour la santé de demain"))
+            )
+          ),
+          div(
+            class = "edu-login-panel",
+            div(
+              class = "edu-login-card",
+              h2("Connexion à EDUSILLAB"),
+              div(class="login-subtitle", "Accédez à votre environnement pédagogique sécurisé."),
+              textInput("identifiant", "Identifiant", placeholder="Votre identifiant"),
+              div(
+                class="edu-password-wrap",
+                passwordInput("mot_de_passe", "Mot de passe", placeholder="Votre mot de passe"),
+                tags$button(type="button", id="toggle_login_password", class="edu-password-eye", `aria-label`="Afficher ou masquer le mot de passe", "◉")
+              ),
+              div(
+                class="edu-login-options",
+                checkboxInput("se_souvenir", "Se souvenir de mon identifiant", value=FALSE),
+                actionLink("mot_de_passe_oublie", "Mot de passe oublié ?", class="edu-login-forgot-live")
+              ),
+              actionButton("connexion", "Se connecter", class="btn-primary"),
+              uiOutput("message_connexion"),
+              div(class="edu-login-security", "EDUSILLAB • CCNB Campus de Dieppe • Environnement pédagogique")
+            )
           )
         )
       )
@@ -3532,6 +3819,7 @@ server <- function(input, output, session) {
             paste(utilisateur_connecte()$prenom, utilisateur_connecte()$nom)
           ),
           p(strong("Courriel : "), utilisateur_connecte()$email),
+          passwordInput("mdp_temporaire_obligatoire", "Mot de passe temporaire actuel"),
           passwordInput("nouveau_mdp_obligatoire", "Nouveau mot de passe"),
           passwordInput("confirmation_mdp_obligatoire", "Confirmer le nouveau mot de passe"),
           actionButton("enregistrer_nouveau_mdp", "Enregistrer", class = "btn-success"),
@@ -3543,6 +3831,15 @@ server <- function(input, output, session) {
 
     u <- utilisateur_connecte()
     ini <- toupper(substr(ifelse(is.null(u$initiales), "", u$initiales), 1, 2))
+
+    # Nom complet de la personne connectee pour l'affichage dans la barre superieure.
+    prenom_connecte <- if (is.null(u$prenom) || length(u$prenom) == 0 || is.na(u$prenom[1])) "" else trimws(as.character(u$prenom[1]))
+    nom_connecte <- if (is.null(u$nom) || length(u$nom) == 0 || is.na(u$nom[1])) "" else trimws(as.character(u$nom[1]))
+    nom_complet_connecte <- trimws(paste(prenom_connecte, nom_connecte))
+    if (!nzchar(nom_complet_connecte)) {
+      nom_complet_connecte <- if (is.null(u$identifiant) || length(u$identifiant) == 0 || is.na(u$identifiant[1])) "Utilisateur" else as.character(u$identifiant[1])
+    }
+
     cfg <- lire_config_portail()
 
     logo_portail <- ccnb_logo_default
@@ -3579,7 +3876,7 @@ server <- function(input, output, session) {
         actionButton("accueil", "⌂  Accueil"),
 
         if (u$perm_recherche_patient == 1 || u$perm_patients == 1)
-          actionButton("menu_patients", "♟  Patients"),
+          actionButton("menu_patients", "♟  Liste clients / Patients"),
 
         if (u$perm_requisition == 1)
           actionButton("menu_requisition", "▣  Nouvelle demande"),
@@ -3587,7 +3884,7 @@ server <- function(input, output, session) {
         if (u$perm_reception == 1)
           actionButton("menu_reception", "⇩  Réception des spécimens"),
 
-        actionButton("menu_repertoire", "⚗  Répertoire d'analyses"),
+        actionButton("menu_repertoire", "⚗  Répertoire / Dictionnaire d'analyses"),
 
         if (u$perm_historique == 1)
           actionButton("menu_historique", "◷  Historique"),
@@ -3659,7 +3956,11 @@ server <- function(input, output, session) {
           ),
           div(
             class = "portal-topbar-meta",
-            span(class="topbar-user", "◉  ", switch(toupper(u$role), "ADMIN"="Administrateur", "SUPERUTILISATEUR"="Super utilisateur", "UTILISATEUR"="Utilisateur", "ETUDIANT"="Étudiant", u$role), "  ▾"),
+            span(
+              class = "topbar-user",
+              title = switch(toupper(u$role), "ADMIN"="Administrateur", "SUPERUTILISATEUR"="Super utilisateur", "UTILISATEUR"="Utilisateur", "ETUDIANT"="Étudiant", u$role),
+              "◉  ", nom_complet_connecte, "  ▾"
+            ),
             tags$button(type="button", class="topbar-logout", onclick="$('#deconnexion').click();", "↪  Déconnexion")
           )
         ),
@@ -3688,37 +3989,46 @@ server <- function(input, output, session) {
   output$contenu_page <- renderUI({
     req(utilisateur_connecte())
     cfg <- lire_config_portail()
+    # Logo dynamique disponible dans toutes les pages de contenu.
+    # Evite l'erreur "object logo_portail not found" sur la page d'accueil.
+    logo_portail <- ccnb_logo_default
 
     if (page_active() == "accueil") {
+      u <- utilisateur_connecte()
+      role_affiche <- switch(
+        toupper(trimws(as.character(u$role))),
+        "ADMIN" = "Administrateur",
+        "ADMINISTRATEUR" = "Administrateur",
+        "SUPERUTILISATEUR" = "Super utilisateur",
+        "SUPERUSER" = "Super utilisateur",
+        "UTILISATEUR" = "Utilisateur",
+        "ETUDIANT" = "Étudiant",
+        as.character(u$role)
+      )
+      nom_affiche <- trimws(paste(u$prenom, u$nom))
+
       return(
         div(
-          class = "edu-reference-screen",
           div(
-            class = "edu-reference-canvas",
-            tags$img(src="edusillab_reference_exacte.png", class="edu-reference-image", alt="EDUSILLAB - accueil"),
-
-            # Menu gauche
-            tags$button(class="edu-hotspot", style="left:0%;top:9.2%;width:24.5%;height:6.1%;", onclick="$('#accueil').click();", `aria-label`="Accueil"),
-            tags$button(class="edu-hotspot", style="left:0%;top:15.3%;width:24.5%;height:5.8%;", onclick="$('#menu_patients').click();", `aria-label`="Patients"),
-            tags$button(class="edu-hotspot", style="left:0%;top:21.1%;width:24.5%;height:5.8%;", onclick="$('#menu_requisition').click();", `aria-label`="Nouvelle demande"),
-            tags$button(class="edu-hotspot", style="left:0%;top:26.9%;width:24.5%;height:5.8%;", onclick="$('#menu_reception').click();", `aria-label`="Reception des specimens"),
-            tags$button(class="edu-hotspot", style="left:0%;top:32.7%;width:24.5%;height:5.8%;", onclick="$('#menu_repertoire').click();", `aria-label`="Repertoire d'analyses"),
-            tags$button(class="edu-hotspot", style="left:0%;top:38.5%;width:24.5%;height:5.8%;", onclick="$('#menu_historique').click();", `aria-label`="Historique"),
-            tags$button(class="edu-hotspot", style="left:0%;top:44.3%;width:24.5%;height:5.8%;", onclick="$('#menu_utilisateurs').click();", `aria-label`="Utilisateurs"),
-            tags$button(class="edu-hotspot", style="left:0%;top:50.1%;width:24.5%;height:5.8%;", onclick="$('#menu_materiel').click();", `aria-label`="Materiel et imprimantes"),
-            tags$button(class="edu-hotspot", style="left:0%;top:59.1%;width:24.5%;height:5.2%;", onclick="$('#menu_mon_compte').click();", `aria-label`="Profils et permissions"),
-            tags$button(class="edu-hotspot", style="left:0%;top:64.3%;width:24.5%;height:4.8%;", onclick="$('#menu_parametres').click();", `aria-label`="Parametres"),
-            tags$button(class="edu-hotspot", style="left:0%;top:69.1%;width:24.5%;height:4.8%;", onclick="$('#menu_aide').click();", `aria-label`="Aide"),
-            tags$button(class="edu-hotspot logout", style="left:1.5%;top:85.1%;width:21.5%;height:5.4%;", onclick="$('#deconnexion').click();", `aria-label`="Deconnexion"),
-
-            # Barre superieure
-            tags$button(class="edu-hotspot logout", style="left:82.8%;top:0%;width:17.2%;height:8.3%;", onclick="$('#deconnexion').click();", `aria-label`="Deconnexion"),
-
-            # Quatre cartes principales
-            tags$button(class="edu-hotspot", style="left:25.8%;top:52.1%;width:17.4%;height:21.4%;", onclick="$('#menu_requisition').click();", `aria-label`="Nouvelle demande"),
-            tags$button(class="edu-hotspot", style="left:44.0%;top:52.1%;width:17.4%;height:21.4%;", onclick="$('#menu_reception').click();", `aria-label`="Reception des specimens"),
-            tags$button(class="edu-hotspot", style="left:62.2%;top:52.1%;width:17.4%;height:21.4%;", onclick="$('#menu_repertoire').click();", `aria-label`="Repertoire d'analyses"),
-            tags$button(class="edu-hotspot", style="left:80.4%;top:52.1%;width:17.0%;height:21.4%;", onclick="$('#menu_historique').click();", `aria-label`="Historique")
+            class="edu-home-hero",
+            div(class="edu-hero-logo", tags$img(src=logo_portail, alt="CCNB Laboratoire Dieppe")),
+            div(
+              class="edu-hero-copy",
+              div(class="edu-welcome", "Bienvenue dans"),
+              div(class="edu-title", "EDUSIL", span(class="edu-orange", "LAB")),
+              div(class="edu-subtitle", "Système d’information de laboratoire pédagogique"),
+              div(class="edu-campus", paste(cfg$institution, "—", cfg$campus)),
+              div(class="edu-rule"),
+              div(class="edu-tagline", "Apprendre aujourd'hui pour la santé de demain")
+            )
+          ),
+          div(
+            class="edu-home-actions",
+            if (u$perm_requisition == 1) div(class="edu-action-card edu-blue", div(class="edu-action-icon", "▣"), h3("Nouvelle demande"), p("Créer une réquisition et préparer les spécimens."), actionButton("home_requisition", "→", class="edu-arrow")),
+            if (u$perm_reception == 1) div(class="edu-action-card edu-green", div(class="edu-action-icon", "⇩"), h3("Réception des spécimens"), p("Recevoir et tracer les spécimens au laboratoire."), actionButton("home_reception", "→", class="edu-arrow")),
+            if (u$perm_recherche_patient == 1 || u$perm_patients == 1) div(class="edu-action-card edu-blue", div(class="edu-action-icon", "♟"), h3("Liste clients / Patients"), p("Rechercher et consulter les patients enregistrés."), actionButton("home_patients", "→", class="edu-arrow")),
+            div(class="edu-action-card edu-orange-card", div(class="edu-action-icon", "⚗"), h3("Répertoire / Dictionnaire d’analyses"), p("Consulter les analyses, mnémoniques, départements, contenants et instructions."), actionButton("home_repertoire", "→", class="edu-arrow")),
+            if (u$perm_historique == 1) div(class="edu-action-card edu-purple", div(class="edu-action-icon", "◷"), h3("Historique"), p("Consulter la traçabilité des demandes et spécimens."), actionButton("home_historique", "→", class="edu-arrow"))
           )
         )
       )
@@ -4766,6 +5076,7 @@ server <- function(input, output, session) {
       perm_reception = permission(u$perm_reception[1]),
       perm_historique = permission(u$perm_historique[1]),
       perm_utilisateurs = permission(u$perm_utilisateurs[1]),
+      perm_portail = permission(u$perm_portail[1]),
       perm_analyses = if (
         toupper(trimws(as.character(u$role[1]))) %in%
           c("ADMIN","ADMINISTRATEUR","SUPERUTILISATEUR","SUPERUSER")
@@ -4790,7 +5101,13 @@ server <- function(input, output, session) {
       silent = TRUE
     )
 
-    if (u$changer_mot_de_passe[1] == 1) {
+    changer_mdp <- if (
+      is.null(u$changer_mot_de_passe) ||
+      length(u$changer_mot_de_passe) == 0 ||
+      is.na(u$changer_mot_de_passe[1])
+    ) 0L else as.integer(u$changer_mot_de_passe[1])
+
+    if (identical(changer_mdp, 1L)) {
       page_active("changer_mdp")
     } else {
       page_active("accueil")
@@ -4970,6 +5287,45 @@ server <- function(input, output, session) {
     patient_requisition(NULL)
     order_actuel(order_vide())
     page_active("accueil")
+  })
+
+
+  observeEvent(input$home_requisition, {
+    req(utilisateur_connecte())
+    req(utilisateur_connecte()$perm_requisition == 1)
+    page_active("requisition")
+  })
+  observeEvent(input$home_reception, {
+    req(utilisateur_connecte())
+    req(utilisateur_connecte()$perm_reception == 1)
+    page_active("reception")
+  })
+  observeEvent(input$home_patients, {
+    req(utilisateur_connecte())
+    req(utilisateur_connecte()$perm_recherche_patient == 1 || utilisateur_connecte()$perm_patients == 1)
+    page_active("patients")
+  })
+  observeEvent(input$home_repertoire, {
+    req(utilisateur_connecte())
+    page_active("repertoire")
+    refresh_analyses(refresh_analyses()+1L)
+    try(journaliser("CONSULTATION_REPERTOIRE_ANALYSES", "Ouverture du répertoire d'analyses depuis l'accueil."), silent=TRUE)
+  })
+  observeEvent(input$home_historique, {
+    req(utilisateur_connecte())
+    req(utilisateur_connecte()$perm_historique == 1)
+    page_active("historique")
+  })
+
+  observeEvent(input$mot_de_passe_oublie, {
+    showModal(modalDialog(
+      title = "Mot de passe oublié",
+      p("Pour protéger les comptes EDUSILLAB, la réinitialisation du mot de passe est effectuée par un administrateur."),
+      p("Communiquez votre identifiant EDUSILLAB à votre professeur ou à l'administrateur du système. Un nouveau mot de passe temporaire pourra être généré."),
+      p(strong("Après la réinitialisation, vous devrez choisir un nouveau mot de passe à votre prochaine connexion.")),
+      easyClose = TRUE,
+      footer = modalButton("Fermer")
+    ))
   })
 
   observeEvent(input$inactive_logout, {
@@ -6276,7 +6632,7 @@ server <- function(input, output, session) {
       ""
     )
 
-    action_btn <- if (utilisateur_connecte()$perm_analyses == 1) {
+    action_btn <- if (permission(utilisateur_connecte()$perm_analyses) == 1L) {
       statut_btn <- ifelse(
         d$actif == 1,
         sprintf(
@@ -7499,6 +7855,7 @@ server <- function(input, output, session) {
           column(4, textInput("nouveau_medicare", "Medicare")),
           column(4, textInput("nouveau_dossier", "Numéro de dossier"))
         ),
+        helpText("Medicare facultatif. Si le numéro de dossier est vide, EDUSILLAB génère automatiquement un numéro unique à 6 chiffres."),
         textInput("nouvelle_adresse", "Adresse"),
         textInput("nouvelle_ville", "Ville"),
         textInput("nouvelle_province", "Province"),
@@ -7526,15 +7883,14 @@ server <- function(input, output, session) {
       return()
     }
 
-    if (!nzchar(dossier) && !nzchar(medicare)) {
-      output$message_patient <- renderUI(
-        div(style = "color:red;", "Dossier ou Medicare obligatoire.")
-      )
-      return()
-    }
-
     con <- ouvrir_db()
     on.exit(DBI::dbDisconnect(con), add = TRUE)
+
+    dossier_genere <- FALSE
+    if (!nzchar(dossier)) {
+      dossier <- generer_numero_dossier_patient(con)
+      dossier_genere <- TRUE
+    }
 
     existe <- DBI::dbGetQuery(
       con,
@@ -7588,7 +7944,13 @@ server <- function(input, output, session) {
     )
 
     output$message_patient <- renderUI(
-      div(class = "success-box", "Patient ajouté.")
+      div(
+        class = "success-box",
+        if (dossier_genere)
+          paste0("Patient ajouté. Numéro de dossier généré automatiquement : ", dossier)
+        else
+          paste0("Patient ajouté. Numéro de dossier : ", dossier)
+      )
     )
   })
 
@@ -7983,13 +8345,6 @@ server <- function(input, output, session) {
       return()
     }
 
-    if (!nzchar(dossier) && !nzchar(medicare)) {
-      output$req_message <- renderUI(
-        div(style = "color:red;", "Dossier ou Medicare obligatoire.")
-      )
-      return()
-    }
-
     if (nrow(ordre) == 0) {
       output$req_message <- renderUI(
         div(style = "color:red;", "Au moins une analyse est nécessaire.")
@@ -8004,6 +8359,13 @@ server <- function(input, output, session) {
     numero_requisition <- NA_character_
 
     tryCatch({
+
+      # Le Medicare est facultatif. Si aucun dossier n'est saisi,
+      # créer un numéro de dossier unique avant toute recherche/création.
+      if (!nzchar(dossier)) {
+        dossier <- generer_numero_dossier_patient(con)
+        updateTextInput(session, "req_numero_dossier", value = dossier)
+      }
 
       patient_dossier <- data.frame()
       patient_medicare <- data.frame()
@@ -10527,47 +10889,82 @@ server <- function(input, output, session) {
   observeEvent(input$enregistrer_nouveau_mdp, {
     req(utilisateur_connecte())
 
-    nouveau <- input$nouveau_mdp_obligatoire
-    conf <- input$confirmation_mdp_obligatoire
+    actuel <- trimws(as.character(input$mdp_temporaire_obligatoire %||% ""))
+    nouveau <- as.character(input$nouveau_mdp_obligatoire %||% "")
+    conf <- as.character(input$confirmation_mdp_obligatoire %||% "")
 
-    if (!nzchar(nouveau) || !nzchar(conf)) {
+    output$message_changement_mdp <- renderUI(NULL)
+
+    if (!nzchar(actuel) || !nzchar(nouveau) || !nzchar(conf)) {
       output$message_changement_mdp <- renderUI(
-        div(style = "color:red;", "Veuillez remplir les deux champs.")
+        div(style = "color:#b42318;font-weight:600;", "Veuillez remplir les trois champs.")
       )
       return()
     }
 
-    if (nouveau != conf) {
+    if (!identical(nouveau, conf)) {
       output$message_changement_mdp <- renderUI(
-        div(style = "color:red;", "Les mots de passe ne correspondent pas.")
+        div(style = "color:#b42318;font-weight:600;", "Les nouveaux mots de passe ne correspondent pas.")
       )
       return()
     }
 
     if (nchar(nouveau) < 8) {
       output$message_changement_mdp <- renderUI(
-        div(style = "color:red;", "Minimum 8 caractères.")
+        div(style = "color:#b42318;font-weight:600;", "Le nouveau mot de passe doit contenir au moins 8 caractères.")
       )
       return()
     }
 
-    con <- ouvrir_db()
-    DBI::dbExecute(
-      con,
-      "
-      UPDATE utilisateurs
-      SET
-        mot_de_passe = ?,
-        changer_mot_de_passe = 0,
-        tentatives_echouees = 0,
-        verrouille = 0
-      WHERE id = ?
-      ",
-      params = list(nouveau, utilisateur_connecte()$id)
-    )
-    DBI::dbDisconnect(con)
+    if (identical(actuel, nouveau)) {
+      output$message_changement_mdp <- renderUI(
+        div(style = "color:#b42318;font-weight:600;", "Le nouveau mot de passe doit être différent du mot de passe temporaire.")
+      )
+      return()
+    }
 
-    page_active("accueil")
+    con <- NULL
+    tryCatch({
+      con <- ouvrir_db()
+      uid <- as.integer(utilisateur_connecte()$id)[1]
+      udb <- DBI::dbGetQuery(
+        con,
+        "SELECT id, mot_de_passe, changer_mot_de_passe FROM utilisateurs WHERE id = ?",
+        params = list(uid)
+      )
+
+      if (nrow(udb) != 1) stop("Compte utilisateur introuvable dans la base de données.")
+      if (!identical(as.character(udb$mot_de_passe[1]), actuel)) {
+        stop("Le mot de passe temporaire actuel est incorrect.")
+      }
+
+      nmod <- DBI::dbExecute(
+        con,
+        paste0(
+          "UPDATE utilisateurs SET mot_de_passe = ?, changer_mot_de_passe = 0, ",
+          "tentatives_echouees = 0, verrouille = 0 WHERE id = ?"
+        ),
+        params = list(nouveau, uid)
+      )
+      if (!identical(as.integer(nmod), 1L)) stop("Le mot de passe n'a pas pu être enregistré.")
+
+      DBI::dbDisconnect(con)
+      con <- NULL
+
+      try(journaliser(
+        "CHANGEMENT_MOT_DE_PASSE",
+        paste0("Mot de passe temporaire remplacé par l'utilisateur : ", code_utilisateur())
+      ), silent = TRUE)
+
+      showNotification("Mot de passe modifié avec succès.", type = "message", duration = 4)
+      page_active("accueil")
+    }, error = function(e) {
+      if (!is.null(con) && DBI::dbIsValid(con)) try(DBI::dbDisconnect(con), silent = TRUE)
+      msg <- conditionMessage(e)
+      output$message_changement_mdp <- renderUI(
+        div(style = "color:#b42318;font-weight:600;", paste0("Impossible de modifier le mot de passe : ", msg))
+      )
+    })
   })
 
   observeEvent(input$modifier_mon_mdp, {
