@@ -4,6 +4,8 @@
 library(shiny)
 library(DBI)
 library(RSQLite)
+# RPostgres est chargé uniquement lorsque le backend PostgreSQL est activé.
+# Tant que EDUSILLAB_DB_BACKEND=sqlite, le comportement historique reste inchangé.
 library(DT)
 library(readxl)
 library(jsonlite)
@@ -67,12 +69,55 @@ options(
   shiny.sanitize.errors = TRUE
 )
 
-# Connexion SQLite renforcée pour plusieurs sessions Shiny simultanées.
-ouvrir_db <- function() {
-  con <- NULL
+# Backend de base de données. La version de référence reste SQLite tant que
+# EDUSILLAB_DB_BACKEND n'est pas explicitement réglé à "postgres".
+edusillab_db_backend <- tolower(trimws(Sys.getenv("EDUSILLAB_DB_BACKEND", unset = "sqlite")))
+if (!edusillab_db_backend %in% c("sqlite", "postgres")) {
+  stop("EDUSILLAB_DB_BACKEND doit être 'sqlite' ou 'postgres'.")
+}
 
-  # Une connexion peut exceptionnellement échouer quelques millisecondes
-  # lorsqu'une autre session termine une écriture. On réessaie proprement.
+message("Backend DB demandé : ", edusillab_db_backend)
+
+# Connexion renforcée. En mode SQLite, on conserve exactement les réglages
+# multi-utilisateurs déjà validés. Le mode PostgreSQL utilise uniquement les
+# variables secrètes de Connect Cloud / Neon et n'inscrit aucun secret dans app.R.
+ouvrir_db <- function() {
+  if (identical(edusillab_db_backend, "postgres")) {
+    if (!requireNamespace("RPostgres", quietly = TRUE)) {
+      stop("Le package RPostgres est requis pour EDUSILLAB_DB_BACKEND=postgres.")
+    }
+
+    pg_host <- trimws(Sys.getenv("EDUSILLAB_PG_HOST", unset = ""))
+    pg_port <- suppressWarnings(as.integer(Sys.getenv("EDUSILLAB_PG_PORT", unset = "5432")))
+    pg_db   <- trimws(Sys.getenv("EDUSILLAB_PG_DATABASE", unset = ""))
+    pg_user <- trimws(Sys.getenv("EDUSILLAB_PG_USER", unset = ""))
+    pg_pwd  <- Sys.getenv("EDUSILLAB_PG_PASSWORD", unset = "")
+    pg_ssl  <- trimws(Sys.getenv("EDUSILLAB_PG_SSLMODE", unset = "require"))
+
+    manquantes <- c(
+      HOST = !nzchar(pg_host), DATABASE = !nzchar(pg_db),
+      USER = !nzchar(pg_user), PASSWORD = !nzchar(pg_pwd)
+    )
+    if (any(manquantes)) {
+      stop("Variables PostgreSQL manquantes : ",
+           paste(names(manquantes)[manquantes], collapse = ", "))
+    }
+    if (is.na(pg_port)) pg_port <- 5432L
+
+    con <- DBI::dbConnect(
+      RPostgres::Postgres(),
+      host = pg_host,
+      port = pg_port,
+      dbname = pg_db,
+      user = pg_user,
+      password = pg_pwd,
+      sslmode = pg_ssl
+    )
+    DBI::dbExecute(con, "SET TIME ZONE 'America/Moncton'")
+    return(con)
+  }
+
+  con <- NULL
   for (tentative in seq_len(5L)) {
     con <- tryCatch(
       DBI::dbConnect(RSQLite::SQLite(), db_path),
@@ -85,14 +130,10 @@ ouvrir_db <- function() {
   if (is.null(con) || !DBI::dbIsValid(con))
     stop("Connexion temporairement indisponible. Veuillez réessayer.")
 
-  # WAL permet plusieurs lecteurs pendant une écriture.
-  # busy_timeout évite un échec immédiat 'database is locked'.
   DBI::dbExecute(con, "PRAGMA foreign_keys = ON")
   DBI::dbExecute(con, "PRAGMA busy_timeout = 60000")
   DBI::dbExecute(con, "PRAGMA synchronous = NORMAL")
 
-  # journal_mode est persistant dans le fichier SQLite. Éviter de le forcer
-  # à chaque connexion réduit les conflits entre sessions au démarrage.
   mode_journal <- tryCatch(
     DBI::dbGetQuery(con, "PRAGMA journal_mode")[[1]][1],
     error=function(e) ""
@@ -101,7 +142,6 @@ ouvrir_db <- function() {
     try(DBI::dbExecute(con, "PRAGMA journal_mode = WAL"), silent=TRUE)
   }
   try(DBI::dbExecute(con, "PRAGMA wal_autocheckpoint = 1000"), silent=TRUE)
-
   con
 }
 
@@ -172,6 +212,13 @@ norm_txt <- function(x) {
 norm_upper <- function(x) toupper(norm_txt(x))
 
 sql_colonnes <- function(con, table) {
+  if (inherits(con, "PqConnection")) {
+    return(DBI::dbGetQuery(
+      con,
+      "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? ORDER BY ordinal_position",
+      params = list(table)
+    )$column_name)
+  }
   DBI::dbGetQuery(con, paste0("PRAGMA table_info(", table, ")"))$name
 }
 
