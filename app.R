@@ -14390,15 +14390,25 @@ setTimeout(async function(){
     con <- ouvrir_db()
     on.exit(DBI::dbDisconnect(con), add = TRUE)
 
+    # Recherche robuste pour Connect Cloud :
+    # accepte la valeur telle quelle et ignore espaces / tirets dans dossier et Medicare.
+    dossier_cle <- toupper(gsub("[[:space:]-]", "", dossier))
+    medicare_cle <- toupper(gsub("[[:space:]-]", "", medicare))
+
     p <- DBI::dbGetQuery(
       con,
       "
       SELECT *
       FROM patients
       WHERE actif = 1
-        AND (numero_dossier = ? OR medicare = ?)
+        AND (
+          (? <> '' AND UPPER(REPLACE(REPLACE(TRIM(COALESCE(numero_dossier,'')), ' ', ''), '-', '')) = ?)
+          OR
+          (? <> '' AND UPPER(REPLACE(REPLACE(TRIM(COALESCE(medicare,'')), ' ', ''), '-', '')) = ?)
+        )
+      LIMIT 2
       ",
-      params = list(dossier, medicare)
+      params = list(dossier_cle, dossier_cle, medicare_cle, medicare_cle)
     )
 
     if (nrow(p) == 1) {
