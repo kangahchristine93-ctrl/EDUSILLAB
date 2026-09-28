@@ -1482,6 +1482,42 @@
         "RemoteSha.Version": "1.0.5"
       }
     },
+    "magick": {
+      "Source": "CRAN",
+      "Repository": "http://rspm/default/latest",
+      "description": {
+        "Package": "magick",
+        "Type": "Package",
+        "Title": "Advanced Graphics and Image-Processing in R",
+        "Version": "2.9.1",
+        "Authors@R": "person(\"Jeroen\", \"Ooms\", role = c(\"aut\", \"cre\"), email = \"jeroenooms@gmail.com\",\n    comment = c(ORCID = \"0000-0002-4035-0289\"))",
+        "Description": "Bindings to 'ImageMagick': the most comprehensive open-source image\n    processing library available. Supports many common formats (png, jpeg, tiff,\n    pdf, etc) and manipulations (rotate, scale, crop, trim, flip, blur, etc).\n    All operations are vectorized via the Magick++ STL meaning they operate either\n    on a single frame or a series of frames for working with layers, collages,\n    or animation. In RStudio images are automatically previewed when printed to\n    the console, resulting in an interactive editing environment. Also includes\n    a graphics device for creating drawing onto images using pixel coordinates.",
+        "License": "MIT + file LICENSE",
+        "URL": "https://docs.ropensci.org/magick/\nhttps://ropensci.r-universe.dev/magick",
+        "BugReports": "https://github.com/ropensci/magick/issues",
+        "SystemRequirements": "ImageMagick++: ImageMagick-c++-devel (rpm) or\nlibmagick++-dev (deb)",
+        "VignetteBuilder": "knitr",
+        "Depends": "R (>= 4.1.0)",
+        "Imports": "Rcpp (>= 0.12.12), magrittr, curl",
+        "LinkingTo": "Rcpp",
+        "Suggests": "av, spelling, jsonlite, methods, knitr, rmarkdown, rsvg,\nwebp, pdftools, ggplot2, gapminder, IRdisplay, tesseract,\ngifski",
+        "Encoding": "UTF-8",
+        "RoxygenNote": "7.3.3",
+        "Language": "en-US",
+        "NeedsCompilation": "yes",
+        "Packaged": "2026-02-28 14:23:36 UTC; jeroen",
+        "Author": "Jeroen Ooms [aut, cre] (ORCID: <https://orcid.org/0000-0002-4035-0289>)",
+        "Maintainer": "Jeroen Ooms <jeroenooms@gmail.com>",
+        "Repository": "RSPM",
+        "Date/Publication": "2026-02-28 15:40:02 UTC",
+        "Built": "R 4.6.0; x86_64-pc-linux-gnu; 2026-07-06 14:00:10 UTC; unix",
+        "RemoteType": "standard",
+        "RemotePkgRef": "magick",
+        "RemoteRef": "magick",
+        "RemoteRepos": "http://rspm/default/latest",
+        "RemoteSha.Version": "2.9.1"
+      }
+    },
     "magrittr": {
       "Source": "CRAN",
       "Repository": "http://rspm/default/latest",
@@ -1680,6 +1716,43 @@
         "RemoteSha.Version": "2.4.2"
       }
     },
+    "openxlsx": {
+      "Source": "CRAN",
+      "Repository": "http://rspm/default/latest",
+      "description": {
+        "Type": "Package",
+        "Package": "openxlsx",
+        "Title": "Read, Write and Edit xlsx Files",
+        "Version": "4.2.9",
+        "Authors@R": "\n    c(person(given = \"Philipp\",\n             family = \"Schauberger\",\n             role = \"aut\",\n             email = \"philipp@schauberger.co.at\"),\n      person(given = \"Alexander\",\n             family = \"Walker\",\n             role = \"aut\",\n             email = \"Alexander.Walker1989@gmail.com\"),\n      person(given = \"Luca\",\n             family = \"Braglia\",\n             role = \"ctb\"),\n      person(given = \"Joshua\",\n             family = \"Sturm\",\n             role = \"ctb\"),\n      person(given = \"Jan Marvin\",\n             family = \"Garbuszus\",\n             role = c(\"ctb\", \"cre\"),\n             email = \"jan.garbuszus@ruhr-uni-bochum.de\"),\n      person(given = \"Jordan Mark\",\n             family = \"Barbone\",\n             role = \"ctb\",\n             email = \"jmbarbone@gmail.com\",\n             comment = c(ORCID = \"0000-0001-9788-3628\")),\n      person(given = \"David\",\n             family = \"Zimmermann\",\n             role = \"ctb\",\n             email = \"david_j_zimmermann@hotmail.com\"),\n      person(given = \"Reinhold\",\n             family = \"Kainhofer\",\n             role = \"ctb\",\n             email = \"reinhold@kainhofer.com\"))",
+        "Description": "Simplifies the creation of Excel .xlsx files by providing a\n    high level interface to writing, styling and editing worksheets.\n    Through the use of 'Rcpp', read/write times are comparable to the\n    'xlsx' and 'XLConnect' packages with the added benefit of removing the\n    dependency on Java.",
+        "License": "MIT + file LICENSE",
+        "URL": "https://ycphs.github.io/openxlsx/index.html,\nhttps://github.com/ycphs/openxlsx",
+        "BugReports": "https://github.com/ycphs/openxlsx/issues",
+        "Depends": "R (>= 3.3.0)",
+        "Imports": "grDevices, methods, Rcpp, stats, stringi, utils, zip",
+        "Suggests": "curl, formula.tools, ggplot2, jpeg, knitr, rmarkdown,\nsurvival, testthat",
+        "LinkingTo": "Rcpp",
+        "VignetteBuilder": "knitr",
+        "Encoding": "UTF-8",
+        "Language": "en-US",
+        "Collate": "'CommentClass.R' 'HyperlinkClass.R' 'RcppExports.R'\n'class_definitions.R' 'StyleClass.R' 'WorkbookClass.R'\n'asserts.R' 'baseXML.R' 'borderFunctions.R' 'build_workbook.R'\n'chartsheet_class.R' 'conditional_formatting.R'\n'data-fontSizeLookupTables.R' 'helperFunctions.R'\n'loadWorkbook.R' 'onUnload.R' 'openXL.R' 'openxlsx-package.R'\n'openxlsx.R' 'openxlsxCoerce.R' 'readWorkbook.R'\n'setWindowSize.R' 'sheet_data_class.R' 'utils.R'\n'workbook_column_widths.R' 'workbook_read_workbook.R'\n'workbook_write_data.R' 'worksheet_class.R' 'wrappers.R'\n'writeData.R' 'writeDataTable.R' 'writexlsx.R' 'zzz.R'",
+        "LazyData": "true",
+        "Config/roxygen2/version": "8.1.0",
+        "NeedsCompilation": "yes",
+        "Packaged": "2026-09-02 06:32:31 UTC; janmarvingarbuszus",
+        "Author": "Philipp Schauberger [aut],\n  Alexander Walker [aut],\n  Luca Braglia [ctb],\n  Joshua Sturm [ctb],\n  Jan Marvin Garbuszus [ctb, cre],\n  Jordan Mark Barbone [ctb] (ORCID:\n    <https://orcid.org/0000-0001-9788-3628>),\n  David Zimmermann [ctb],\n  Reinhold Kainhofer [ctb]",
+        "Maintainer": "Jan Marvin Garbuszus <jan.garbuszus@ruhr-uni-bochum.de>",
+        "Repository": "RSPM",
+        "Date/Publication": "2026-09-02 09:30:02 UTC",
+        "Built": "R 4.6.0; x86_64-pc-linux-gnu; 2026-09-03 08:10:52 UTC; unix",
+        "RemoteType": "standard",
+        "RemotePkgRef": "openxlsx",
+        "RemoteRef": "openxlsx",
+        "RemoteRepos": "http://rspm/default/latest",
+        "RemoteSha.Version": "4.2.9"
+      }
+    },
     "otel": {
       "Source": "CRAN",
       "Repository": "http://rspm/default/latest",
@@ -1844,6 +1917,35 @@
         "RemoteRef": "pkgconfig",
         "RemoteRepos": "http://rspm/default/latest",
         "RemoteSha.Version": "2.0.3"
+      }
+    },
+    "png": {
+      "Source": "CRAN",
+      "Repository": "http://rspm/default/latest",
+      "description": {
+        "Package": "png",
+        "Version": "0.1-9",
+        "Title": "Read and write PNG images",
+        "Author": "Simon Urbanek [aut, cre, cph] (https://urbanek.nz, ORCID:\n    <https://orcid.org/0000-0003-2297-1732>)",
+        "Authors@R": "person(\"Simon\", \"Urbanek\", role=c(\"aut\",\"cre\",\"cph\"), email=\"Simon.Urbanek@r-project.org\", comment=c(\"https://urbanek.nz\", ORCID=\"0000-0003-2297-1732\"))",
+        "Maintainer": "Simon Urbanek <Simon.Urbanek@r-project.org>",
+        "Depends": "R (>= 2.9.0)",
+        "Description": "This package provides an easy and simple way to read, write and display bitmap images stored in the PNG format. It can read and write both files and in-memory raw vectors.",
+        "License": "GPL-2 | GPL-3",
+        "SystemRequirements": "libpng",
+        "URL": "https://www.rforge.net/png/",
+        "BugReports": "https://github.com/s-u/png/issues/",
+        "NeedsCompilation": "yes",
+        "Packaged": "2026-03-15 03:28:25 UTC; rforge",
+        "Repository": "RSPM",
+        "Date/Publication": "2026-03-15 16:50:02 UTC",
+        "Encoding": "UTF-8",
+        "Built": "R 4.6.0; x86_64-pc-linux-gnu; 2026-08-12 20:21:34 UTC; unix",
+        "RemoteType": "standard",
+        "RemotePkgRef": "png",
+        "RemoteRef": "png",
+        "RemoteRepos": "http://rspm/default/latest",
+        "RemoteSha.Version": "0.1-9"
       }
     },
     "prettyunits": {
@@ -2292,7 +2394,7 @@
         "Type": "Package",
         "Package": "rsconnect",
         "Title": "Deploy Docs, Apps, and APIs to 'Posit Connect', 'shinyapps.io',\nand 'RPubs'",
-        "Version": "1.11.0",
+        "Version": "1.11.1",
         "Authors@R": "c(\n    person(\"Aron\", \"Atkins\", , \"aron@posit.co\", role = c(\"aut\", \"cre\")),\n    person(\"Toph\", \"Allen\", role = \"aut\"),\n    person(\"Hadley\", \"Wickham\", role = \"aut\"),\n    person(\"Jonathan\", \"McPherson\", role = \"aut\"),\n    person(\"JJ\", \"Allaire\", role = \"aut\"),\n    person(\"Posit Software, PBC\", role = c(\"cph\", \"fnd\"))\n  )",
         "Description": "Programmatic deployment interface for 'RPubs',\n    'shinyapps.io', and 'Posit Connect'. Supported content types include R\n    Markdown documents, Shiny applications, Plumber APIs, plots, and\n    static web content.",
         "License": "GPL-2",
@@ -2309,17 +2411,17 @@
         "Encoding": "UTF-8",
         "Config/roxygen2/version": "8.1.0",
         "NeedsCompilation": "no",
-        "Packaged": "2026-08-25 13:17:54 UTC; aron",
+        "Packaged": "2026-09-21 18:49:53 UTC; aron",
         "Author": "Aron Atkins [aut, cre],\n  Toph Allen [aut],\n  Hadley Wickham [aut],\n  Jonathan McPherson [aut],\n  JJ Allaire [aut],\n  Posit Software, PBC [cph, fnd]",
         "Maintainer": "Aron Atkins <aron@posit.co>",
         "Repository": "RSPM",
-        "Date/Publication": "2026-08-25 16:50:02 UTC",
-        "Built": "R 4.6.0; ; 2026-08-26 04:39:00 UTC; unix",
+        "Date/Publication": "2026-09-21 19:30:02 UTC",
+        "Built": "R 4.6.0; ; 2026-09-22 04:10:54 UTC; unix",
         "RemoteType": "standard",
         "RemotePkgRef": "rsconnect",
         "RemoteRef": "rsconnect",
         "RemoteRepos": "http://rspm/default/latest",
-        "RemoteSha.Version": "1.11.0"
+        "RemoteSha.Version": "1.11.1"
       }
     },
     "rstudioapi": {
@@ -3060,11 +3162,17 @@
     }
   },
   "files": {
+    ".Renviron.example": {
+      "checksum": "3ffbcce24be89439037e72bae8ccd4ce"
+    },
     "app.R": {
-      "checksum": "e9fd9c0d291ea04aa1307c68ffec54e1"
+      "checksum": "e85aa82824de44b0e736ef9e6ec0d7bb"
     },
     "DESCRIPTION": {
       "checksum": "41ed192a395853950f17a81164b99498"
+    },
+    "generate_manifest.R": {
+      "checksum": "5d61dfcb92da4d7841abeefdcc8841dc"
     },
     "GENERER_MANIFEST.R": {
       "checksum": "6d6fe7733b6f92c3e15baf436347d0c3"
@@ -3075,11 +3183,35 @@
     "LICENSE": {
       "checksum": "4e8ab2077b028f4ef357fbd5ae9c9462"
     },
+    "POSTGRESQL_MIGRATION.md": {
+      "checksum": "aba425f1ec4699ef3278d0ca567a002a"
+    },
+    "README_CONNECT_CLOUD.md": {
+      "checksum": "a4b9aad9bee1f86138d689352f115cc6"
+    },
     "README_DEPLOIEMENT.md": {
       "checksum": "0c004f38807729d181dcf991bae22e66"
     },
     "Repertoire_analyses_EduLab.xlsx": {
       "checksum": "c56d69a2d80d6709557faa473e29a576"
+    },
+    "requisition_templates/20260927_032219_requete_vitalite_2__1_.pdf": {
+      "checksum": "fac773ce9a6f4b30d44f73d864adfc1f"
+    },
+    "requisition_templates/20260927_032250_requete_horzion_2__1_.pdf": {
+      "checksum": "4f40dabd1418264038f75c2ecf6368ce"
+    },
+    "requisition_templates/20260927_032316_requete_horizon.pdf": {
+      "checksum": "9b741e46a608f3410ee47cf161408523"
+    },
+    "requisition_templates/20260927_043419_R_quisition_CUHGD__1_.pdf": {
+      "checksum": "550ca3f6a651a99497392441e418c910"
+    },
+    "requisition_templates/20260927_043447_Requ_te_Laboratoire__1_.pdf": {
+      "checksum": "9a73dc525b39c48a1518cd84297751ad"
+    },
+    "requisition_templates/20260927_044901_R_quisition_CUHGD__1_.pdf": {
+      "checksum": "550ca3f6a651a99497392441e418c910"
     },
     "www/ccnb_laboratoire_dieppe.png": {
       "checksum": "3fa732e52a693f2be54c68048184d298"
