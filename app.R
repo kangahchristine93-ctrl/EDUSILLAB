@@ -3015,27 +3015,30 @@ Shiny.addCustomMessageHandler(
       return;
     }
 
-    var html =
-      '<html><head><title>Réquisition</title>' +
-      '<style>' +
-      '@page{margin:0;}' +
-      'body{margin:0;}' +
-      '.page{page-break-after:always;}' +
-      '.page:last-child{page-break-after:auto;}' +
-      'img{display:block;width:100%;height:auto;}' +
-      '</style></head><body>';
+    var d = w.document;
+    d.open();
+    d.title = 'Réquisition';
+
+    var style = d.createElement('style');
+    style.textContent =
+      '@page{margin:0;} body{margin:0;} ' +
+      '.page{page-break-after:always;} ' +
+      '.page:last-child{page-break-after:auto;} ' +
+      'img{display:block;width:100%;height:auto;}';
+    d.head.appendChild(style);
 
     images.forEach(function(src) {
-      html +=
-        '<div class=\"page\"><img src=\"' +
-        src +
-        '\"></div>';
+      var page = d.createElement('div');
+      page.className = 'page';
+
+      var img = d.createElement('img');
+      img.src = src;
+
+      page.appendChild(img);
+      d.body.appendChild(page);
     });
 
-    html += '</body></html>';
-
-    w.document.write(html);
-    w.document.close();
+    d.close();
 
     setTimeout(function() {
       w.focus();
@@ -3094,10 +3097,17 @@ Shiny.addCustomMessageHandler('req-print-final',function(msg){
   var img=out.toDataURL('image/png');
   var w=window.open('','_blank');
   if(!w) { alert('Autorisez les fenêtres contextuelles pour imprimer.'); return; }
-  w.document.write('<html><head><title>Réquisition</title>'+
-    '<style>@page{size:auto;margin:0}body{margin:0;text-align:center}img{width:100%;height:auto}</style>'+
-    '</head><body><img src=\"'+img+'\" onload=\"window.print()\"></body></html>');
-  w.document.close();
+  var d=w.document;
+  d.open();
+  d.title='Réquisition';
+  var style=d.createElement('style');
+  style.textContent='@page{size:auto;margin:0} body{margin:0;text-align:center} img{width:100%;height:auto}';
+  d.head.appendChild(style);
+  var imageEl=d.createElement('img');
+  imageEl.src=img;
+  imageEl.onload=function(){ setTimeout(function(){ w.focus(); w.print(); },100); };
+  d.body.appendChild(imageEl);
+  d.close();
 });
 ")),
 
