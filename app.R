@@ -9398,7 +9398,7 @@ server <- function(input, output, session) {
              c.nom_controle AS Contrôle,c.niveau AS Niveau,c.lot AS Lot,
              c.date_expiration AS Expiration,c.moyenne_cible AS `Moyenne cible`,
              c.ecart_type_cible AS `Écart-type cible`,r.valeur AS Résultat,
-             ROUND(r.z_score,2) AS `Z-score`,r.statut_westgard AS Statut,
+             ROUND(CAST(r.z_score AS NUMERIC),2) AS `Z-score`,r.statut_westgard AS Statut,
              CASE WHEN COALESCE(r.exclu_calcul,0)=1 THEN 'Oui' ELSE 'Non' END AS `Exclu calcul`,
              COALESCE(r.motif_exclusion,'') AS `Motif exclusion`,
              COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'') AS `Saisi par`,
