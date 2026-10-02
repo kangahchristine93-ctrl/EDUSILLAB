@@ -80,6 +80,25 @@ pg_db_env   <- trimws(Sys.getenv("EDUSILLAB_PG_DATABASE", unset = ""))
 pg_user_env <- trimws(Sys.getenv("EDUSILLAB_PG_USER", unset = ""))
 pg_pwd_env  <- Sys.getenv("EDUSILLAB_PG_PASSWORD", unset = "")
 
+
+# ============================================================
+# DIAGNOSTIC POSIT CONNECT / NEON - SANS AFFICHER LE MOT DE PASSE
+# ============================================================
+message("========== DIAGNOSTIC EDUSILLAB ==========")
+message("BACKEND : ", Sys.getenv("EDUSILLAB_DB_BACKEND", unset = "<ABSENT>"))
+message("HOST : ", Sys.getenv("EDUSILLAB_PG_HOST", unset = "<ABSENT>"))
+message("PORT : ", Sys.getenv("EDUSILLAB_PG_PORT", unset = "<ABSENT>"))
+message("DATABASE : ", Sys.getenv("EDUSILLAB_PG_DATABASE", unset = "<ABSENT>"))
+message("USER : ", Sys.getenv("EDUSILLAB_PG_USER", unset = "<ABSENT>"))
+message("SSLMODE : ", Sys.getenv("EDUSILLAB_PG_SSLMODE", unset = "<ABSENT>"))
+message("TZ : ", Sys.getenv("EDUSILLAB_TZ", unset = "<ABSENT>"))
+pwd_diag <- Sys.getenv("EDUSILLAB_PG_PASSWORD", unset = "")
+message("PASSWORD PRESENT : ", nzchar(pwd_diag))
+message("PASSWORD LONGUEUR : ", nchar(pwd_diag))
+message("PASSWORD ESPACE DEBUT/FIN : ", !identical(pwd_diag, trimws(pwd_diag)))
+message("===========================================")
+rm(pwd_diag)
+
 pg_config_detectee <- any(nzchar(c(pg_host_env, pg_db_env, pg_user_env, pg_pwd_env)))
 pg_config_complete <- all(nzchar(c(pg_host_env, pg_db_env, pg_user_env, pg_pwd_env)))
 
