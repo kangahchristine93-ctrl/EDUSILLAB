@@ -80,25 +80,6 @@ pg_db_env   <- trimws(Sys.getenv("EDUSILLAB_PG_DATABASE", unset = ""))
 pg_user_env <- trimws(Sys.getenv("EDUSILLAB_PG_USER", unset = ""))
 pg_pwd_env  <- Sys.getenv("EDUSILLAB_PG_PASSWORD", unset = "")
 
-
-# ============================================================
-# DIAGNOSTIC POSIT CONNECT / NEON - SANS AFFICHER LE MOT DE PASSE
-# ============================================================
-message("========== DIAGNOSTIC EDUSILLAB ==========")
-message("BACKEND : ", Sys.getenv("EDUSILLAB_DB_BACKEND", unset = "<ABSENT>"))
-message("HOST : ", Sys.getenv("EDUSILLAB_PG_HOST", unset = "<ABSENT>"))
-message("PORT : ", Sys.getenv("EDUSILLAB_PG_PORT", unset = "<ABSENT>"))
-message("DATABASE : ", Sys.getenv("EDUSILLAB_PG_DATABASE", unset = "<ABSENT>"))
-message("USER : ", Sys.getenv("EDUSILLAB_PG_USER", unset = "<ABSENT>"))
-message("SSLMODE : ", Sys.getenv("EDUSILLAB_PG_SSLMODE", unset = "<ABSENT>"))
-message("TZ : ", Sys.getenv("EDUSILLAB_TZ", unset = "<ABSENT>"))
-pwd_diag <- Sys.getenv("EDUSILLAB_PG_PASSWORD", unset = "")
-message("PASSWORD PRESENT : ", nzchar(pwd_diag))
-message("PASSWORD LONGUEUR : ", nchar(pwd_diag))
-message("PASSWORD ESPACE DEBUT/FIN : ", !identical(pwd_diag, trimws(pwd_diag)))
-message("===========================================")
-rm(pwd_diag)
-
 pg_config_detectee <- any(nzchar(c(pg_host_env, pg_db_env, pg_user_env, pg_pwd_env)))
 pg_config_complete <- all(nzchar(c(pg_host_env, pg_db_env, pg_user_env, pg_pwd_env)))
 
@@ -349,6 +330,79 @@ db_commit_retry <- function(con, essais=10L) {
 }
 
 # Pour les petites écritures hors transaction explicite.
+# Suppression contrôlée d'un enregistrement avec ses descendants définis par
+# les clés étrangères. Utilisé uniquement après confirmation explicite d'un administrateur.
+edusillab_tables <- function(con) {
+  if (est_postgres(con)) {
+    return(db_query(con,
+      "SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE'")$table_name)
+  }
+  db_query(con,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")$name
+}
+
+edusillab_fk_vers <- function(con, table_parent, colonne_parent="id") {
+  if (est_postgres(con)) {
+    return(db_query(con,"
+      SELECT tc.table_name AS table_enfant,
+             kcu.column_name AS colonne_enfant,
+             ccu.column_name AS colonne_parent
+      FROM information_schema.table_constraints tc
+      JOIN information_schema.key_column_usage kcu
+        ON tc.constraint_name=kcu.constraint_name AND tc.table_schema=kcu.table_schema
+      JOIN information_schema.constraint_column_usage ccu
+        ON ccu.constraint_name=tc.constraint_name AND ccu.table_schema=tc.table_schema
+      WHERE tc.constraint_type='FOREIGN KEY'
+        AND tc.table_schema=current_schema()
+        AND ccu.table_name=?
+        AND ccu.column_name=?",
+      params=list(table_parent,colonne_parent)))
+  }
+  res <- list()
+  for (tt in edusillab_tables(con)) {
+    ident <- as.character(DBI::dbQuoteIdentifier(con,tt))
+    fk <- tryCatch(DBI::dbGetQuery(con,paste0("PRAGMA foreign_key_list(",ident,")")),
+                   error=function(e) data.frame())
+    if(nrow(fk)>0) {
+      ok <- fk$table==table_parent & fk$to==colonne_parent
+      if(any(ok)) {
+        res[[length(res)+1L]] <- data.frame(
+          table_enfant=rep(tt,sum(ok)),
+          colonne_enfant=fk$from[ok],
+          colonne_parent=fk$to[ok],
+          stringsAsFactors=FALSE)
+      }
+    }
+  }
+  if(length(res)==0) return(data.frame(table_enfant=character(),colonne_enfant=character(),colonne_parent=character()))
+  do.call(rbind,res)
+}
+
+edusillab_supprimer_cascade <- function(con, table, id_value, visites=NULL) {
+  cle <- paste(table,as.character(id_value),sep=":")
+  if(!is.null(visites) && exists(cle,envir=visites,inherits=FALSE)) return(invisible(TRUE))
+  if(is.null(visites)) visites <- new.env(parent=emptyenv())
+  assign(cle,TRUE,envir=visites)
+
+  refs <- edusillab_fk_vers(con,table,"id")
+  if(nrow(refs)>0) {
+    for(i in seq_len(nrow(refs))) {
+      te <- refs$table_enfant[i]
+      ce <- refs$colonne_enfant[i]
+      cols <- sql_colonnes(con,te)
+      qt <- as.character(DBI::dbQuoteIdentifier(con,te))
+      qc <- as.character(DBI::dbQuoteIdentifier(con,ce))
+      if("id" %in% cols) {
+        enfants <- db_query(con,paste0("SELECT id FROM ",qt," WHERE ",qc,"=?"),params=list(id_value))
+        if(nrow(enfants)>0) for(cid in enfants$id) edusillab_supprimer_cascade(con,te,cid,visites)
+      }
+      db_execute(con,paste0("DELETE FROM ",qt," WHERE ",qc,"=?"),params=list(id_value))
+    }
+  }
+  qt <- as.character(DBI::dbQuoteIdentifier(con,table))
+  db_execute(con,paste0("DELETE FROM ",qt," WHERE id=?"),params=list(id_value))
+  invisible(TRUE)
+}
+
 db_execute_retry <- function(con, statement, params=NULL, essais=10L) {
   derniere <- NULL
   for (i in seq_len(essais)) {
@@ -1222,6 +1276,10 @@ ajouter_colonne_si_absente(con,"hemato_qc_controles","qc_test_id","INTEGER")
 
 ajouter_colonne_si_absente(con,"hemato_qc_resultats","statut_westgard","TEXT")
 ajouter_colonne_si_absente(con,"hemato_qc_resultats","z_score","REAL")
+# Gestion des points QC : un point peut être conservé dans l'historique tout en étant
+# exclu des calculs/statistiques et du graphique Levey-Jennings.
+ajouter_colonne_si_absente(con,"hemato_qc_resultats","exclu_calcul","INTEGER NOT NULL DEFAULT 0")
+ajouter_colonne_si_absente(con,"hemato_qc_resultats","motif_exclusion","TEXT")
 
 
 # Attribution pédagogique des dossiers reçus par département (H / HC)
@@ -6164,7 +6222,14 @@ server <- function(input, output, session) {
                       column(2,downloadButton("qc_hist_pdf","PDF",class="btn-danger"))
                     ),
                     br(),
-                    DT::DTOutput("qc_historique_table")
+                    DT::DTOutput("qc_historique_table"),
+                    conditionalPanel(
+                      condition="input.qc_historique_table_rows_selected != null",
+                      br(),
+                      actionButton("qc_toggle_exclusion_point","Exclure / réinclure le point des calculs",class="btn-warning"),
+                      actionButton("qc_supprimer_point","Supprimer définitivement le point",class="btn-danger")
+                    ),
+                    uiOutput("qc_point_message")
                   )
                 ),
                 if(role_qc %in% c("ADMIN","SUPERUTILISATEUR"))
@@ -9327,13 +9392,15 @@ server <- function(input, output, session) {
     req(input$qc_work_px)
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     sql <- "
-      SELECT r.date_resultat AS Date,c.px AS Département,
+      SELECT r.id AS `ID point`,r.date_resultat AS Date,c.px AS Département,
              COALESCE(qt.code,'') AS Code,COALESCE(qt.nom,'') AS Test,
              COALESCE(qu.symbole,'') AS Unité,
              c.nom_controle AS Contrôle,c.niveau AS Niveau,c.lot AS Lot,
              c.date_expiration AS Expiration,c.moyenne_cible AS `Moyenne cible`,
              c.ecart_type_cible AS `Écart-type cible`,r.valeur AS Résultat,
              ROUND(r.z_score,2) AS `Z-score`,r.statut_westgard AS Statut,
+             CASE WHEN COALESCE(r.exclu_calcul,0)=1 THEN 'Oui' ELSE 'Non' END AS `Exclu calcul`,
+             COALESCE(r.motif_exclusion,'') AS `Motif exclusion`,
              COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'') AS `Saisi par`,
              COALESCE(u.identifiant,'') AS Identifiant,
              COALESCE(r.commentaire,'') AS Commentaire
@@ -9386,9 +9453,62 @@ server <- function(input, output, session) {
   })
 
   output$qc_historique_table <- DT::renderDT({
-    DT::datatable(qc_historique_filtre(),rownames=FALSE,filter="top",
-      options=list(pageLength=15,scrollX=TRUE,lengthMenu=c(10,15,25,50,100)))
+    DT::datatable(
+      qc_historique_filtre(),rownames=FALSE,filter="top",selection="single",
+      options=list(pageLength=15,scrollX=TRUE,lengthMenu=c(10,15,25,50,100),
+                   columnDefs=list(list(targets=0,visible=FALSE)))
+    )
   })
+
+  observeEvent(input$qc_toggle_exclusion_point,{
+    req(qc_role_admin())
+    d <- qc_historique_filtre()
+    sel <- input$qc_historique_table_rows_selected
+    if(length(sel)!=1 || sel<1 || sel>nrow(d)) return()
+    rid <- suppressWarnings(as.integer(d[sel,"ID point"]))
+    if(is.na(rid)) return()
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    cur <- db_query(con,"SELECT COALESCE(exclu_calcul,0) AS exclu FROM hemato_qc_resultats WHERE id=?",
+                    params=list(rid))
+    if(nrow(cur)!=1) return()
+    nv <- if(as.integer(cur$exclu[1])==1L) 0L else 1L
+    db_execute(con,
+      "UPDATE hemato_qc_resultats SET exclu_calcul=?, motif_exclusion=? WHERE id=?",
+      params=list(nv,if(nv==1L) "Exclu manuellement par administrateur" else "",rid))
+    qc_refresh(qc_refresh()+1L)
+    showNotification(if(nv==1L) "Point conservé dans l'historique mais exclu des calculs." else
+                       "Point réintégré aux calculs.",type="message")
+  },ignoreInit=TRUE)
+
+  observeEvent(input$qc_supprimer_point,{
+    req(qc_role_admin())
+    d <- qc_historique_filtre()
+    sel <- input$qc_historique_table_rows_selected
+    if(length(sel)!=1 || sel<1 || sel>nrow(d)) return()
+    rid <- suppressWarnings(as.integer(d[sel,"ID point"]))
+    if(is.na(rid)) return()
+    showModal(modalDialog(
+      title="Supprimer ce point de contrôle ?",
+      "Cette suppression est définitive. Le point disparaîtra de l'historique et du graphique.",
+      footer=tagList(modalButton("Annuler"),
+                     actionButton("qc_supprimer_point_confirmer","Supprimer définitivement",class="btn-danger")),
+      easyClose=FALSE
+    ))
+  },ignoreInit=TRUE)
+
+  observeEvent(input$qc_supprimer_point_confirmer,{
+    req(qc_role_admin())
+    d <- qc_historique_filtre()
+    sel <- input$qc_historique_table_rows_selected
+    if(length(sel)!=1 || sel<1 || sel>nrow(d)) { removeModal(); return() }
+    rid <- suppressWarnings(as.integer(d[sel,"ID point"]))
+    if(is.na(rid)) { removeModal(); return() }
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    db_execute(con,"DELETE FROM hemato_qc_resultats WHERE id=?",params=list(rid))
+    removeModal()
+    qc_refresh(qc_refresh()+1L)
+    showNotification("Point QC supprimé définitivement.",type="message")
+  },ignoreInit=TRUE)
 
   output$qc_hist_csv <- downloadHandler(
     filename=function() paste0("EDUSILLAB_QC_",input$qc_work_px,"_",format(Sys.Date(),"%Y-%m-%d"),".csv"),
@@ -9476,6 +9596,7 @@ server <- function(input, output, session) {
       JOIN hemato_qc_controles c ON c.id=r.controle_id
       WHERE c.qc_test_id=?
         AND c.px=?
+        AND COALESCE(r.exclu_calcul,0)=0
         AND COALESCE(c.nom_controle,'')=COALESCE(?,'')
         AND COALESCE(c.niveau,'')=COALESCE(?,'')
       ORDER BY r.date_resultat,r.id",
@@ -18059,6 +18180,11 @@ setTimeout(async function(){
           "Enregistrer les modifications",
           class = "btn-success"
         ),
+        actionButton(
+          "supprimer_utilisateur_historique",
+          "Supprimer l'utilisateur et son historique",
+          class = "btn-danger"
+        ),
         br(), br(),
         uiOutput("message_modifier_user")
       )
@@ -18179,6 +18305,49 @@ setTimeout(async function(){
       div(class = "success-box", "Utilisateur et permissions mis à jour.")
     )
   })
+
+  observeEvent(input$supprimer_utilisateur_historique,{
+    req(utilisateur_connecte()$perm_utilisateurs==1,input$modifier_user_id)
+    uid <- suppressWarnings(as.integer(input$modifier_user_id))
+    if(is.na(uid)) return()
+    if(uid==as.integer(utilisateur_connecte()$id)) {
+      showNotification("Vous ne pouvez pas supprimer votre propre compte pendant votre session.",type="error")
+      return()
+    }
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    u <- db_query(con,"SELECT matricule,prenom,nom FROM utilisateurs WHERE id=?",params=list(uid))
+    if(nrow(u)!=1) return()
+    showModal(modalDialog(
+      title="Suppression définitive de l'utilisateur",
+      tags$p("Utilisateur : ",tags$strong(paste(u$matricule[1],u$prenom[1],u$nom[1]))),
+      tags$p("Le compte et les enregistrements reliés par les clés étrangères seront supprimés définitivement."),
+      tags$p(tags$strong("Cette action est irréversible.")),
+      footer=tagList(modalButton("Annuler"),
+                     actionButton("confirmer_suppression_utilisateur_historique",
+                                  "Supprimer le compte et l'historique",class="btn-danger")),
+      easyClose=FALSE
+    ))
+  },ignoreInit=TRUE)
+
+  observeEvent(input$confirmer_suppression_utilisateur_historique,{
+    req(utilisateur_connecte()$perm_utilisateurs==1,input$modifier_user_id)
+    uid <- suppressWarnings(as.integer(input$modifier_user_id))
+    if(is.na(uid) || uid==as.integer(utilisateur_connecte()$id)) { removeModal(); return() }
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tryCatch({
+      db_begin_retry(con)
+      edusillab_supprimer_cascade(con,"utilisateurs",uid)
+      db_commit_retry(con)
+      removeModal()
+      output$formulaire_modifier_utilisateur <- renderUI(NULL)
+      refresh_users(refresh_users()+1L)
+      showNotification("Utilisateur et historique relié supprimés.",type="message")
+    },error=function(e){
+      try(DBI::dbRollback(con),silent=TRUE)
+      removeModal()
+      showNotification(paste("Suppression impossible :",conditionMessage(e)),type="error",duration=12)
+    })
+  },ignoreInit=TRUE)
 
   # ----------------------------------------------------------
   # RESET / MODIFICATION MOT DE PASSE
