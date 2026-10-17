@@ -18959,7 +18959,9 @@ setTimeout(async function(){
   observeEvent(input$reimprimer_requisition_id, {
     req(utilisateur_connecte()$perm_historique == 1)
 
-    requisition_id <- as.integer(input$reimprimer_requisition_id)
+    tryCatch({
+    requisition_id <- suppressWarnings(as.integer(input$reimprimer_requisition_id))
+    req(length(requisition_id) == 1L, !is.na(requisition_id))
     dernier_pdf_reimpression(NULL)
     journaliser(
       "REIMPRESSION_ETIQUETTES",
@@ -18970,16 +18972,7 @@ setTimeout(async function(){
     con <- ouvrir_db()
     on.exit(DBI::dbDisconnect(con), add = TRUE)
 
-    # Rattrapage des anciennes requisitions : tests de chimie deja prescrits
-    # mais omis dans specimens. Conserve les codes-barres existants.
-    tryCatch({
-      db_begin_retry(con)
-      synchroniser_chimie_requisition(con,requisition_id)
-      db_commit_retry(con)
-    }, error=function(e) {
-      try(DBI::dbRollback(con),silent=TRUE)
-      showNotification(paste('Synchronisation chimie :',conditionMessage(e)),type='warning',duration=10)
-    })
+    # La réimpression est en lecture seule : aucune modification de spécimen.
 
     etiquettes <- db_query(
       con,
@@ -19027,37 +19020,11 @@ setTimeout(async function(){
       return()
     }
 
-    # Configuration de l'imprimante / format d'étiquette.
-    imp <- db_query(
-      con,
-      "
-      SELECT *
-      FROM materiel_impression
-      WHERE actif = 1
-      ORDER BY par_defaut DESC, id
-      LIMIT 1
-      "
-    )
-
-    largeur <- if (nrow(imp) == 1) imp$largeur_mm[1] else 100
-    hauteur <- if (nrow(imp) == 1) imp$hauteur_mm[1] else 50
-
+    # Ne pas produire le PDF avant que l'utilisateur choisisse les étiquettes.
+    # Cela évite une double génération lourde et une déconnexion de Shiny.
     numero_req <- etiquettes$numero_requisition[1]
-    nom_pdf <- paste0(
-      "reimpression_etiquettes_REQ_",
-      numero_req,
-      "_",
-      format(Sys.time(), "%Y%m%d_%H%M%S"),
-      ".pdf"
-    )
-
-    chemin_pdf <- file.path(preview_dir, nom_pdf)
-
-    creer_pdf_partage_ou_individuel(etiquettes,chemin_pdf,con,utilisateur_connecte()$id)
-
     dernieres_etiquettes(etiquettes)
     etiquettes_selectionnees(seq_len(nrow(etiquettes)))
-    dernier_pdf_etiquettes(chemin_pdf)
 
     choix_reimpression <- lapply(seq_len(nrow(etiquettes)), function(i) {
       analyse_txt <- ifelse(
@@ -19138,6 +19105,11 @@ setTimeout(async function(){
         footer = modalButton("Fermer")
       )
     )
+    }, error = function(e) {
+      message("EDUSILLAB REIMPRESSION - erreur : ", conditionMessage(e))
+      showNotification(paste("Réimpression impossible :", conditionMessage(e)),
+                       type="error", duration=15)
+    })
   })
 
   observeEvent(input$reprint_tout_selectionner, {
@@ -19204,7 +19176,8 @@ setTimeout(async function(){
 
     nom_pdf <- paste0(
       "reimpression_selection_",
-      format(Sys.time(), "%Y%m%d_%H%M%S"),
+      as.integer(utilisateur_connecte()$id), "_",
+      format(Sys.time(), "%Y%m%d_%H%M%OS6"),
       ".pdf"
     )
 
@@ -19228,6 +19201,7 @@ setTimeout(async function(){
         type = "message"
       )
     }, error = function(e) {
+      message("EDUSILLAB PDF REIMPRESSION - erreur : ", conditionMessage(e))
       showNotification(
         paste("Erreur de réimpression :", conditionMessage(e)),
         type = "error",
