@@ -279,14 +279,33 @@ db_execute <- function(con, statement, params = NULL, ...) {
     ))
   }
   sql <- sql_adapter(con, statement)
-  if (is.null(params)) DBI::dbExecute(con, sql, ...)
-  else DBI::dbExecute(con, sql, params = params, ...)
+  # Certaines fonctions d'export transmettent list() a une requete sans
+  # parametres. RPostgres refuse alors dbBind(): Query does not require parameters.
+  # Ne pas transmettre params lorsqu'aucun emplacement SQL n'existe.
+  attend_params <- if (est_postgres(con)) {
+    grepl("\\$[0-9]+", sql, perl = TRUE)
+  } else {
+    grepl("?", sql, fixed = TRUE)
+  }
+  if (is.null(params) || !attend_params) {
+    DBI::dbExecute(con, sql, ...)
+  } else {
+    DBI::dbExecute(con, sql, params = params, ...)
+  }
 }
 
 db_query <- function(con, statement, params = NULL, ...) {
   sql <- sql_adapter(con, statement)
-  if (is.null(params)) DBI::dbGetQuery(con, sql, ...)
-  else DBI::dbGetQuery(con, sql, params = params, ...)
+  attend_params <- if (est_postgres(con)) {
+    grepl("\\$[0-9]+", sql, perl = TRUE)
+  } else {
+    grepl("?", sql, fixed = TRUE)
+  }
+  if (is.null(params) || !attend_params) {
+    DBI::dbGetQuery(con, sql, ...)
+  } else {
+    DBI::dbGetQuery(con, sql, params = params, ...)
+  }
 }
 
 # Détecte uniquement les erreurs SQLite temporaires qui méritent une nouvelle tentative.
@@ -748,6 +767,116 @@ creer_pdf_etiquettes <- function(
 }
 
 
+# Mise en page universelle, en millimetres; chaque imprimante possede ses champs.
+edusillab_legacy_pdf_etiquettes <- creer_pdf_etiquettes
+edusillab_champs_defaut <- function() {
+  champs <- c("code_barre","code","specimen","dossier","patient","naissance","sexe","medicare","location","tubes","contenant","analyses","requisition","saisie","date","signature")
+  data.frame(champ=champs,
+    x_mm=c(3,40,3,53,3,72,3,53,3,50,3,65,3,3,63,3),
+    y_mm=c(3,14,19,19,24,24,30,30,36,36,42,48,48,53,53,58),
+    largeur_mm=c(94,40,48,44,65,25,46,44,45,47,94,32,61,58,34,40),
+    hauteur_mm=c(10,4,4,4,5,4,4,4,4,4,5,3,3,3,3,4),
+    taille_pt=c(9,8,8,8,9,7,7,7,7,7,8,6,6,6,6,7),
+    visible=as.integer(champs!="naissance"),gras=0L,alignement="gauche",stringsAsFactors=FALSE)
+}
+edusillab_champs_personnalises <- function(con,imprimante_id) {
+  tryCatch({
+    db_execute(con,"CREATE TABLE IF NOT EXISTS etiquette_textes_libres (imprimante_id INTEGER NOT NULL, champ TEXT NOT NULL, libelle TEXT NOT NULL, PRIMARY KEY(imprimante_id,champ))")
+    db_query(con,"SELECT champ,libelle FROM etiquette_textes_libres WHERE imprimante_id=? ORDER BY champ",params=list(imprimante_id))
+  },error=function(e) data.frame(champ=character(),libelle=character()))
+}
+edusillab_layout_imprimante <- function(con=NULL, imprimante_id=NULL) {
+  own <- is.null(con); if(own) con <- ouvrir_db(); if(own) on.exit(DBI::dbDisconnect(con),add=TRUE)
+  if(is.null(imprimante_id)) {
+    d<-db_query(con,"SELECT id FROM materiel_impression WHERE actif=1 ORDER BY par_defaut DESC,id LIMIT 1")
+    if(!nrow(d)) return(edusillab_champs_defaut()); imprimante_id<-d$id[1]
+  }
+  x<-tryCatch(db_query(con,"SELECT champ,x_mm,y_mm,largeur_mm,hauteur_mm,taille_pt,visible,gras,alignement FROM etiquette_champs_mm WHERE imprimante_id=?",params=list(imprimante_id)),error=function(e)data.frame())
+  d<-edusillab_champs_defaut()
+  customs<-edusillab_champs_personnalises(con,imprimante_id)
+  if(nrow(customs)) for(i in seq_len(nrow(customs))) {
+    q<-d[1,,drop=FALSE];q$champ<-as.character(customs$champ[i]);q$x_mm<-3;q$y_mm<-3;q$largeur_mm<-40;q$hauteur_mm<-5;q$taille_pt<-8;q$visible<-1L
+    d<-rbind(d,q)
+  }
+  if(nrow(x)) for(i in seq_len(nrow(x))) {j<-match(x$champ[i],d$champ);if(!is.na(j)) for(nm in setdiff(names(d),"champ")) d[j,nm]<-x[i,nm]}
+  d
+}
+creer_pdf_etiquettes <- function(labels,fichier,largeur_mm=100,hauteur_mm=50,offset_x_mm=0,offset_y_mm=0,echelle_pct=100,layout=NULL) {
+  if(is.null(layout)) layout<-tryCatch(edusillab_layout_imprimante(),error=function(e)edusillab_champs_defaut())
+  if(is.null(labels)||!nrow(labels)) stop("Aucune etiquette")
+  largeur_mm<-as.numeric(largeur_mm); hauteur_mm<-as.numeric(hauteur_mm)
+  if(!is.finite(largeur_mm)||!is.finite(hauteur_mm)||largeur_mm<=0||hauteur_mm<=0) stop("Dimensions invalides")
+  grDevices::pdf(fichier,width=largeur_mm/25.4,height=hauteur_mm/25.4,paper="special",onefile=TRUE,family="Helvetica")
+  on.exit(grDevices::dev.off(),add=TRUE)
+  getv<-function(row,col) if(col %in% names(row) && !is.na(row[[col]][1])) as.character(row[[col]][1]) else ""
+  if(!"date_naissance" %in% names(labels)) labels$date_naissance <- NA_character_
+  manque_dn <- is.na(labels$date_naissance) | !nzchar(trimws(as.character(labels$date_naissance)))
+  if(any(manque_dn) && "numero_dossier" %in% names(labels)) {
+    tryCatch({
+      cn_dn <- ouvrir_db(); on.exit(try(DBI::dbDisconnect(cn_dn),silent=TRUE),add=TRUE)
+      dossiers_dn <- unique(as.character(labels$numero_dossier[manque_dn]))
+      for(dos_dn in dossiers_dn) {
+        if(is.na(dos_dn) || !nzchar(dos_dn)) next
+        res_dn <- db_query(cn_dn,"SELECT date_naissance FROM patients WHERE numero_dossier=? LIMIT 1",params=list(dos_dn))
+        if(nrow(res_dn)) labels$date_naissance[manque_dn & !is.na(labels$numero_dossier) & labels$numero_dossier==dos_dn] <- as.character(res_dn$date_naissance[1])
+      }
+    },error=function(e) message("Date de naissance etiquette : ",conditionMessage(e)))
+  }
+  for(i in seq_len(nrow(labels))) {
+    par(mar=c(0,0,0,0),xaxs="i",yaxs="i");plot.new();plot.window(xlim=c(0,largeur_mm),ylim=c(hauteur_mm,0),asp=1)
+    row<-labels[i,,drop=FALSE]
+    values<-list(code=getv(row,"code_barre"),specimen=getv(row,"numero_specimen"),dossier=paste0("DOSSIER ",getv(row,"numero_dossier")),patient=paste(getv(row,"nom"),getv(row,"prenom")),naissance=paste0("NAISSANCE ",getv(row,"date_naissance")),sexe=paste0("SEXE ",getv(row,"sexe")),medicare=paste0("MED ",getv(row,"medicare")),location=paste0("LOC ",getv(row,"location")),tubes=paste0("# TUBES ",getv(row,"quantite")),contenant=getv(row,"contenant"),analyses=paste0("ANALYSES ",gsub(" | ",", ",getv(row,"analyses"),fixed=TRUE)),requisition=paste0("REQ ",getv(row,"numero_requisition")),saisie=paste0("SAISI PAR ",getv(row,"saisi_nom_complet")),date=paste0("DATE/HEURE ",getv(row,"date_saisie")),signature=paste0("SIGNATURE ",getv(row,"signature_initiales")))
+    custom_values<-tryCatch({cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE);imp<-db_query(cn,"SELECT id FROM materiel_impression WHERE actif=1 ORDER BY par_defaut DESC,id LIMIT 1");if(nrow(imp)) edusillab_champs_personnalises(cn,imp$id[1]) else data.frame()},error=function(e)data.frame())
+    if(nrow(custom_values)) for(k in seq_len(nrow(custom_values))) values[[as.character(custom_values$champ[k])]]<-as.character(custom_values$libelle[k])
+    for(j in seq_len(nrow(layout))) {
+      q<-layout[j,];if(!isTRUE(as.numeric(q$visible)==1)) next
+      xx<-as.numeric(q$x_mm)+as.numeric(offset_x_mm); yy<-as.numeric(q$y_mm)+as.numeric(offset_y_mm); ww<-as.numeric(q$largeur_mm); hh<-as.numeric(q$hauteur_mm)
+      if(any(!is.finite(c(xx,yy,ww,hh)))||ww<=0||hh<=0) next
+      if(q$champ=="code_barre") {
+        # Code39 utilise les barres vectorielles, sans echelle relative a une ancienne etiquette.
+        code<-getv(row,"code_barre"); if(!grepl("^[0-9]+$",code)) next
+        patterns<-code39_patterns; chars<-strsplit(paste0("*",code,"*"),"")[[1]]
+        total<-sum(vapply(chars,function(ch)sum(ifelse(strsplit(patterns[[ch]],"")[[1]]=="w",3,1))+1,numeric(1)))
+        xcur<-xx; for(ch in chars) { pat<-strsplit(patterns[[ch]],"")[[1]];for(k in seq_along(pat)) {w<-ww*ifelse(pat[k]=="w",3,1)/total;if(k%%2==1)rect(xcur,yy,xcur+w,yy+hh,col="black",border=NA);xcur<-xcur+w};xcur<-xcur+ww/total };next
+      }
+      val<-values[[as.character(q$champ)]];if(is.null(val)||!nzchar(val)) next
+      size<-as.numeric(q$taille_pt);if(!is.finite(size)||size<=0) size<-7
+      align<-as.character(q$alignement);adj<-if(align=="droite") 1 else if(align=="centre") .5 else 0
+      tx<-xx+adj*ww; ty<-yy+hh/2
+       # Ne jamais tronquer silencieusement les analyses. Ajuster la police
+       # et, pour les analyses, répartir le texte sur plusieurs lignes.
+       if (identical(as.character(q$champ),"analyses")) {
+         codes <- trimws(unlist(strsplit(sub("^ANALYSES[ :]*", "", val), ",", fixed=TRUE)))
+         codes <- codes[nzchar(codes)]
+         lignes <- character(); courant <- "ANALYSES "
+         for (code_test in codes) {
+           essai <- if (identical(courant,"ANALYSES ")) paste0(courant,code_test) else paste0(courant,", ",code_test)
+           if (nchar(essai)>max(14,floor(ww*2.4)) && nzchar(trimws(courant))) {
+             lignes <- c(lignes,trimws(courant)); courant <- code_test
+           } else courant <- essai
+         }
+         lignes <- c(lignes,trimws(courant))
+         lignes <- lignes[nzchar(lignes)]
+         if (!length(lignes)) lignes <- "ANALYSES"
+         # Conserver tous les codes; si la zone est trop petite, réduire la police.
+         taille_effective <- min(size, max(3, hh*72/25.4/max(1,length(lignes))*0.82))
+         taille_effective <- min(taille_effective, max(3, ww*72/25.4 / max(1,max(nchar(lignes)))*1.65))
+         for (li in seq_along(lignes)) {
+           yy_ligne <- yy+(li-0.5)*hh/length(lignes)
+           text(tx,yy_ligne,lignes[li],adj=c(adj,.5),cex=taille_effective/12,font=if(isTRUE(as.numeric(q$gras)==1)) 2 else 1)
+         }
+       } else {
+         maxchar<-max(1,floor(ww/max(.4,size*.21)))
+         if(nchar(val)>maxchar) {
+           size<-min(size,max(3,size*maxchar/nchar(val)))
+         }
+         text(tx,ty,val,adj=c(adj,.5),cex=size/12,font=if(isTRUE(as.numeric(q$gras)==1)) 2 else 1)
+       }
+    }
+  }
+  invisible(fichier)
+}
+
 creer_pdf_etiquettes_selection <- function(
   labels,
   indices,
@@ -806,6 +935,68 @@ if (est_postgres(con)) {
 } else {
   message("Connexion EDUSILLAB : SQLite active — fichier : ", db_path)
 }
+
+
+# ===== MODULE CORRECTION PEDAGOGIQUE / EXPORT PDF ET ZIP =====
+# Corrections conservees independamment des saisies des etudiants.
+edu_corr_pdf <- function(con, exercice_id, fichier) {
+  h <- db_query(con, "SELECT re.id,re.statut,re.requisition_id,re.consigne,u.nom AS etu_nom,u.prenom AS etu_prenom,u.matricule,p.nom AS patient_nom,p.prenom AS patient_prenom FROM requisition_exercices re JOIN utilisateurs u ON u.id=re.etudiant_id JOIN patients p ON p.id=re.patient_id WHERE re.id=?",params=list(exercice_id))
+  if(!nrow(h)) stop("Exercice introuvable")
+  d <- db_query(con,"SELECT categorie,saisie_etudiant,correction_attendue,commentaire FROM edu_corrections_lignes WHERE exercice_id=? ORDER BY id",params=list(exercice_id))
+  n <- db_query(con,"SELECT note,commentaire_general FROM edu_corrections WHERE exercice_id=?",params=list(exercice_id))
+  clean <- function(x) { x <- as.character(x); if(is.na(x)) "" else iconv(x,to="ASCII//TRANSLIT",sub="?") }
+  grDevices::pdf(fichier,width=8.27,height=11.69,onefile=TRUE)
+  on.exit(grDevices::dev.off(),add=TRUE)
+  y <- 0
+  nouvelle_page <- function() {plot.new();plot.window(xlim=c(0,100),ylim=c(0,140)); y <<- 132}
+  ligne <- function(texte,taille=0.83,gras=FALSE) {
+    morceaux <- strwrap(clean(texte),width=105)
+    if(!length(morceaux)) morceaux <- ""
+    for(z in morceaux) { if(y<12) nouvelle_page(); text(5,y,z,adj=c(0,1),cex=taille,font=if(gras)2 else 1); y <<- y-5 }
+  }
+  nouvelle_page()
+  ligne("EDUSILLAB - FICHE DE CORRECTION",1.3,TRUE)
+  ligne(paste("Etudiant :",clean(h$etu_prenom[1]),clean(h$etu_nom[1])," | Matricule :",clean(h$matricule[1])))
+  ligne(paste("Exercice :",exercice_id," | Statut :",clean(h$statut[1])))
+  ligne(paste("Patient pedagogique :",clean(h$patient_prenom[1]),clean(h$patient_nom[1])))
+  if(nrow(n)) {ligne(paste("Note :",clean(n$note[1])),1,TRUE);ligne(paste("Commentaire general :",clean(n$commentaire_general[1])))}
+  ligne("-----------------------------------------------")
+  if(!nrow(d)) ligne("Aucune erreur/commentaire enregistre.")
+  for(i in seq_len(nrow(d))) {
+    ligne(paste("ERREUR",i,"-",clean(d$categorie[i])),0.95,TRUE)
+    ligne(paste("Saisie de l'etudiant :",clean(d$saisie_etudiant[i])))
+    ligne(paste("Correction attendue :",clean(d$correction_attendue[i])))
+    ligne(paste("Commentaire :",clean(d$commentaire[i])))
+    y <- y-3
+  }
+  invisible(fichier)
+}
+
+edu_corr_zip <- function(con, exercice_ids, fichier) {
+  ids <- unique(suppressWarnings(as.integer(exercice_ids)))
+  ids <- ids[!is.na(ids)]
+  if(!length(ids)) stop("Aucun exercice selectionne")
+  td <- tempfile("edusillab_corrections_");dir.create(td)
+  on.exit(unlink(td,recursive=TRUE),add=TRUE)
+  noms <- character()
+  for(id in ids) {
+    f <- paste0("correction_exercice_",id,".pdf")
+    edu_corr_pdf(con,id,file.path(td,f));noms <- c(noms,f)
+  }
+  if(requireNamespace("zip",quietly=TRUE)) {
+    zip::zipr(zipfile=fichier,files=noms,root=td,include_directories=FALSE)
+  } else {
+    old <- setwd(td);on.exit(setwd(old),add=TRUE)
+    utils::zip(zipfile=fichier,files=noms,flags="-q")
+  }
+  if(!file.exists(fichier) || file.info(fichier)$size==0) stop("Creation ZIP impossible. Installer le package R 'zip'.")
+  invisible(fichier)
+}
+
+# Tables non destructives, compatibles SQLite / PostgreSQL.
+db_execute(con,"CREATE TABLE IF NOT EXISTS edu_corrections (exercice_id INTEGER PRIMARY KEY, professeur_id INTEGER, note TEXT, commentaire_general TEXT, date_modification TEXT DEFAULT CURRENT_TIMESTAMP)")
+db_execute(con,"CREATE TABLE IF NOT EXISTS edu_corrections_lignes (id INTEGER PRIMARY KEY AUTOINCREMENT, exercice_id INTEGER NOT NULL, categorie TEXT, saisie_etudiant TEXT, correction_attendue TEXT, commentaire TEXT, date_creation TEXT DEFAULT CURRENT_TIMESTAMP)")
+# ===== FIN MODULE CORRECTION =====
 
 # ------------------------- UTILISATEURS ----------------------
 
@@ -1609,6 +1800,7 @@ CREATE TABLE IF NOT EXISTS requisition_modele_tests (
 ajouter_colonne_si_absente(con,"requisition_modele_tests","libelle_externe","TEXT")
 ajouter_colonne_si_absente(con,"requisition_modele_tests","code_externe","TEXT")
 
+for (nm in c("medecin_prescripteur","location_prelevement","heure_prelevement")) ajouter_colonne_si_absente(con,"requisition_exercices",nm,"TEXT")
 ajouter_colonne_si_absente(con,"requisition_exercices","adresse_postale","TEXT")
 ajouter_colonne_si_absente(con,"requisition_exercices","ville_postale","TEXT")
 ajouter_colonne_si_absente(con,"requisition_exercices","province_postale","TEXT")
@@ -1690,6 +1882,25 @@ CREATE TABLE IF NOT EXISTS requisition_analyses (
 
 ajouter_colonne_si_absente(con, "requisition_analyses", "source_prelevement", "TEXT")
 ajouter_colonne_si_absente(con, "requisition_analyses", "source_autre", "TEXT")
+
+# Association explicite analyse -> specimen (independante des libelles et des virgules).
+db_execute(con, "CREATE TABLE IF NOT EXISTS specimen_analyses (specimen_id INTEGER NOT NULL, analyse_id INTEGER NOT NULL, requisition_id INTEGER NOT NULL, PRIMARY KEY(specimen_id,analyse_id))")
+db_execute(con, "CREATE INDEX IF NOT EXISTS idx_specimen_analyses_req ON specimen_analyses(requisition_id)")
+
+# Diagnostic non bloquant du dictionnaire : valeurs absentes, departements
+# sans PX, mnemotechniques en doublon. Ces anomalies sont signalees au journal.
+tryCatch({
+  diag_dico <- db_query(con, "SELECT a.id,a.mnemonique,a.departement,a.tube_prelevement,COALESCE(dp.px,'') AS px FROM analyses a LEFT JOIN departements_px dp ON UPPER(TRIM(dp.departement))=UPPER(TRIM(a.departement)) WHERE a.actif=1")
+  if(nrow(diag_dico)) {
+    manque_px <- is.na(diag_dico$px) | !nzchar(trimws(diag_dico$px))
+    manque_tube <- is.na(diag_dico$tube_prelevement) | !nzchar(trimws(diag_dico$tube_prelevement))
+    codes <- toupper(trimws(as.character(diag_dico$mnemonique)))
+    doublons <- duplicated(codes) | duplicated(codes,fromLast=TRUE)
+    if(any(manque_px)) warning("Dictionnaire : PX absent pour ",paste(unique(diag_dico$mnemonique[manque_px]),collapse=", "))
+    if(any(manque_tube)) warning("Dictionnaire : tube non renseigne pour ",paste(unique(diag_dico$mnemonique[manque_tube]),collapse=", "))
+    if(any(doublons)) warning("Dictionnaire : mnemotechniques en doublon : ",paste(unique(codes[doublons]),collapse=", "))
+  }
+},error=function(e) message("Diagnostic dictionnaire : ",conditionMessage(e)))
 
 # ------------------------- ÉTIQUETTES / SPÉCIMENS ------------
 
@@ -1804,6 +2015,9 @@ ajouter_colonne_si_absente(con, "materiel_impression", "marge_gauche_mm", "REAL 
 ajouter_colonne_si_absente(con, "materiel_impression", "marge_haut_mm", "REAL DEFAULT 0")
 ajouter_colonne_si_absente(con, "materiel_impression", "pas_x_mm", "REAL")
 ajouter_colonne_si_absente(con, "materiel_impression", "pas_y_mm", "REAL")
+# Positions personnalisees par imprimante, en millimetres.
+db_execute(con,"CREATE TABLE IF NOT EXISTS etiquette_champs_mm (imprimante_id INTEGER NOT NULL, champ TEXT NOT NULL, x_mm REAL NOT NULL, y_mm REAL NOT NULL, largeur_mm REAL NOT NULL, hauteur_mm REAL NOT NULL, taille_pt REAL NOT NULL DEFAULT 7, visible INTEGER NOT NULL DEFAULT 1, gras INTEGER NOT NULL DEFAULT 0, alignement TEXT NOT NULL DEFAULT 'gauche', PRIMARY KEY(imprimante_id,champ))")
+
 
 db_execute(con, "
 CREATE TABLE IF NOT EXISTS planches_etiquettes (
@@ -4768,6 +4982,78 @@ micro_audit <- function(con, travail_id, utilisateur_id, action, details='') {
 
 server <- function(input, output, session) {
 
+
+  # ===== SERVEUR CORRECTION ETUDIANTS =====
+  edu_corr_refresh <- reactiveVal(0L)
+  edu_corr_admin <- function() {
+    u <- utilisateur_connecte()
+    !is.null(u) && toupper(as.character(u$role)) %in% c("ADMIN","SUPERUTILISATEUR")
+  }
+  output$edu_corr_etudiants_ui <- renderUI({
+    req(edu_corr_admin());edu_corr_refresh()
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d<-db_query(cn,"SELECT id,nom,prenom,matricule FROM utilisateurs WHERE UPPER(TRIM(role))='ETUDIANT' AND actif=1 ORDER BY nom,prenom")
+    selectInput("edu_corr_etudiant","Etudiant",choices=setNames(as.character(d$id),paste(d$prenom,d$nom,"-",d$matricule)))
+  })
+  output$edu_corr_exercices_ui <- renderUI({
+    req(edu_corr_admin(),input$edu_corr_etudiant);edu_corr_refresh()
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d<-db_query(cn,"SELECT re.id,re.statut,p.nom,p.prenom FROM requisition_exercices re JOIN patients p ON p.id=re.patient_id WHERE re.etudiant_id=? ORDER BY re.id DESC",params=list(as.integer(input$edu_corr_etudiant)))
+    selectInput("edu_corr_exercice","Requisition attribuee",choices=setNames(as.character(d$id),paste0("#",d$id," - ",d$prenom," ",d$nom," - ",d$statut)))
+  })
+  output$edu_corr_comparaison <- DT::renderDT({
+    req(edu_corr_admin(),input$edu_corr_exercice)
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    eid<-as.integer(input$edu_corr_exercice)
+    d<-db_query(cn,"SELECT requisition_id FROM requisition_exercices WHERE id=?",params=list(eid))
+    attendus<-db_query(cn,"SELECT a.mnemonique FROM requisition_exercice_tests t JOIN analyses a ON a.id=t.analyse_id WHERE t.exercice_id=?",params=list(eid))$mnemonique
+    saisis<-character()
+    if(nrow(d) && !is.na(d$requisition_id[1])) saisis<-db_query(cn,"SELECT a.mnemonique FROM requisition_analyses ra JOIN analyses a ON a.id=ra.analyse_id WHERE ra.requisition_id=?",params=list(d$requisition_id[1]))$mnemonique
+    codes<-sort(unique(c(attendus,saisis)))
+    res<-data.frame(Analyse=codes,Attendue=ifelse(codes %in% attendus,"Oui","Non"),Saisie=ifelse(codes %in% saisis,"Oui","Non"),Concordance=ifelse((codes %in% attendus)==(codes %in% saisis),"Oui","A verifier"))
+    DT::datatable(res,rownames=FALSE,options=list(pageLength=15,scrollX=TRUE))
+  })
+  output$edu_corr_lignes <- DT::renderDT({
+    req(edu_corr_admin(),input$edu_corr_exercice);edu_corr_refresh()
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d<-db_query(cn,"SELECT categorie,saisie_etudiant,correction_attendue,commentaire FROM edu_corrections_lignes WHERE exercice_id=? ORDER BY id",params=list(as.integer(input$edu_corr_exercice)))
+    DT::datatable(d,rownames=FALSE,options=list(scrollX=TRUE))
+  })
+  observeEvent(input$edu_corr_ajouter,{
+    req(edu_corr_admin(),input$edu_corr_exercice)
+    if(!nzchar(trimws(input$edu_corr_categorie))) {showNotification("Indiquer l'element evalue",type="warning");return()}
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    db_execute(cn,"INSERT INTO edu_corrections_lignes(exercice_id,categorie,saisie_etudiant,correction_attendue,commentaire) VALUES (?,?,?,?,?)",params=list(as.integer(input$edu_corr_exercice),input$edu_corr_categorie,input$edu_corr_saisie,input$edu_corr_attendue,input$edu_corr_commentaire))
+    edu_corr_refresh(edu_corr_refresh()+1L);showNotification("Erreur enregistree")
+  })
+  observeEvent(input$edu_corr_enregistrer,{
+    req(edu_corr_admin(),input$edu_corr_exercice)
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    id<-as.integer(input$edu_corr_exercice)
+    db_execute(cn,"DELETE FROM edu_corrections WHERE exercice_id=?",params=list(id))
+    db_execute(cn,"INSERT INTO edu_corrections(exercice_id,professeur_id,note,commentaire_general) VALUES (?,?,?,?)",params=list(id,as.integer(utilisateur_connecte()$id),input$edu_corr_note,input$edu_corr_general))
+    edu_corr_refresh(edu_corr_refresh()+1L);showNotification("Correction enregistree")
+  })
+  output$edu_corr_pdf <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_correction_",input$edu_corr_exercice,".pdf"),
+    content=function(file){req(edu_corr_admin(),input$edu_corr_exercice);cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE);edu_corr_pdf(cn,as.integer(input$edu_corr_exercice),file)}
+  )
+  output$edu_corr_zip <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_corrections_",Sys.Date(),".zip"),
+    content=function(file){
+      req(edu_corr_admin());cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+      if(identical(input$edu_corr_portee,"tous")) {
+        d<-db_query(cn,"SELECT re.id FROM requisition_exercices re JOIN edu_corrections c ON c.exercice_id=re.id ORDER BY re.id")
+      } else {
+        req(input$edu_corr_etudiant)
+        d<-db_query(cn,"SELECT re.id FROM requisition_exercices re JOIN edu_corrections c ON c.exercice_id=re.id WHERE re.etudiant_id=? ORDER BY re.id",params=list(as.integer(input$edu_corr_etudiant)))
+      }
+      if(!nrow(d)) stop("Aucune correction enregistree pour la selection")
+      edu_corr_zip(cn,d$id,file)
+    }
+  )
+  # ===== FIN SERVEUR CORRECTION =====
+
   # Logo par défaut disponible dans la session Shiny.
   # get0() évite l'erreur « object 'CCNB_LOGO_DATA_URI' not found »
   # si l'environnement de déploiement ne voit pas la constante globale.
@@ -5137,6 +5423,8 @@ server <- function(input, output, session) {
   }
 
   creer_pdf_planche_partagee <- function(labels, fichier, imp, case_debut=1L, barcode_layout=NULL) {
+    cn_analyses <- ouvrir_db()
+    labels <- tryCatch(edusillab_completer_analyses_etiquettes(labels,cn_analyses),finally=DBI::dbDisconnect(cn_analyses))
     stopifnot(nrow(imp) == 1)
     pw <- as.numeric(imp$papier_largeur_mm[1]); ph <- as.numeric(imp$papier_hauteur_mm[1])
     lw <- as.numeric(imp$largeur_mm[1]); lh <- as.numeric(imp$hauteur_mm[1])
@@ -5169,57 +5457,78 @@ server <- function(input, output, session) {
     plot.new()
     plot.window(xlim=c(0,pw), ylim=c(0,ph))
 
-    dessiner_une_etiquette <- function(z, x0, y0) {
-      # Coordonnées locales 0..100 x 0..50 converties dans la case physique.
-      # La zone de contenu est plus étroite que l'étiquette physique.
-      # Les colonnes gardent le pas de 69,85 mm, même si le contenu n'occupe que 50 mm.
-      contenu_w <- if(lw > 50) 50 else lw
-      X <- function(v) x0 + (v/100)*contenu_w
-      Y <- function(v) y0 + (v/50)*lh
-      facteur <- min(1.35,max(0.55,min(lw/100,lh/50)))
-      # Codes-barres indépendants (Code 39) : valeur, position et largeur.
-      dessiner_code <- function(champ, xx, yy, ww, hh=13) {
-        if(!champ %in% names(z)) return(invisible(NULL))
-        code <- gsub("[^0-9]","",as.character(z[[champ]]))
-        if(!nzchar(code)) return(invisible(NULL))
-        chars <- strsplit(paste0("*",code,"*"),"")[[1]]
-        poids <- sum(vapply(chars,function(ch) sum(ifelse(strsplit(code39_patterns[[ch]],"")[[1]]=="w",3,1))+1,numeric(1)))
-        pos <- X(xx); largeur_bar <- ww/100*contenu_w
-        for(ch in chars) {
-          pat <- strsplit(code39_patterns[[ch]],"")[[1]]
-          for(j in seq_along(pat)) {
-            w <- largeur_bar*(ifelse(pat[j]=="w",3,1)/poids)
-            if(j%%2==1) rect(pos,Y(yy),pos+w,Y(yy+hh/2),col="black",border=NA)
-            pos <- pos+w
+    # La planche utilise les memes champs mm que les etiquettes individuelles.
+    disposition <- edusillab_layout_imprimante(con=NULL,imprimante_id=as.integer(imp$id[1]))
+    textes_libres <- tryCatch({
+      cn <- ouvrir_db(); on.exit(DBI::dbDisconnect(cn),add=TRUE)
+      edusillab_champs_personnalises(cn,as.integer(imp$id[1]))
+    },error=function(e)data.frame())
+    getv <- function(z,cle) {
+      if(!(cle %in% names(z)) || is.na(z[[cle]][1])) return("")
+      as.character(z[[cle]][1])
+    }
+    if(!"date_naissance" %in% names(labels)) labels$date_naissance <- NA_character_
+    manq <- is.na(labels$date_naissance) | !nzchar(trimws(as.character(labels$date_naissance)))
+    if(any(manq) && "numero_dossier" %in% names(labels)) {
+      try({
+        cn_dn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn_dn),add=TRUE)
+        for(dos in unique(as.character(labels$numero_dossier[manq]))) {
+          if(is.na(dos)||!nzchar(dos))next
+          dn<-db_query(cn_dn,"SELECT date_naissance FROM patients WHERE numero_dossier=? LIMIT 1",params=list(dos))
+          if(nrow(dn)) labels$date_naissance[which(manq & !is.na(labels$numero_dossier) & labels$numero_dossier==dos)]<-as.character(dn$date_naissance[1])
+        }
+      },silent=TRUE)
+    }
+    dessiner_une_etiquette <- function(z,x0,y0) {
+      valeurs <- list(
+        code=getv(z,"code_barre"),specimen=getv(z,"numero_specimen"),
+        dossier=paste0("DOSSIER ",getv(z,"numero_dossier")),
+        patient=trimws(paste(getv(z,"nom"),getv(z,"prenom"))),
+        naissance=if(nzchar(getv(z,"date_naissance"))) paste0("NAISSANCE ",getv(z,"date_naissance")) else "",
+        sexe=paste0("SEXE ",getv(z,"sexe")),medicare=paste0("MED ",getv(z,"medicare")),
+        location=paste0("LOC ",getv(z,"location")),tubes=paste0("# TUBES ",getv(z,"quantite")),
+        contenant=getv(z,"contenant"),analyses=paste0("ANALYSES ",gsub(" | ",", ",getv(z,"analyses"),fixed=TRUE)),
+        requisition=paste0("REQ ",getv(z,"numero_requisition")),
+        saisie=paste0("SAISI PAR ",getv(z,"saisi_nom_complet")),
+        date=paste0("DATE/HEURE ",getv(z,"date_saisie")),
+        signature=paste0("SIGNATURE ",getv(z,"signature_initiales")))
+      if(nrow(textes_libres)) for(k in seq_len(nrow(textes_libres)))
+        valeurs[[as.character(textes_libres$champ[k])]] <- as.character(textes_libres$libelle[k])
+      for(j in seq_len(nrow(disposition))) {
+        q<-disposition[j,]; visible<-suppressWarnings(as.numeric(q$visible[1]))
+        if(length(visible)!=1L || is.na(visible) || visible!=1) next
+        x<-suppressWarnings(as.numeric(q$x_mm[1])); y<-suppressWarnings(as.numeric(q$y_mm[1]))
+        w<-suppressWarnings(as.numeric(q$largeur_mm[1])); h<-suppressWarnings(as.numeric(q$hauteur_mm[1]))
+        if(any(!is.finite(c(x,y,w,h))) || w<=0 || h<=0) next
+        xx<-x0+x; yy<-y0+lh-y-h
+        champ<-as.character(q$champ[1])
+        if(champ=="code_barre") {
+          code<-getv(z,"code_barre")
+          if(!grepl("^[0-9]+$",code)) next
+          chars<-strsplit(paste0("*",code,"*"),"")[[1]]
+          poids<-sum(vapply(chars,function(ch)sum(ifelse(strsplit(code39_patterns[[ch]],"")[[1]]=="w",3,1))+1,numeric(1)))
+          cur<-xx
+          for(ch in chars) {
+            pat<-strsplit(code39_patterns[[ch]],"")[[1]]
+            for(k in seq_along(pat)) {
+              bw<-w*ifelse(pat[k]=="w",3,1)/poids
+              if(k%%2L==1L) rect(cur,yy,cur+bw,yy+h,col="black",border=NA)
+              cur<-cur+bw
+            }
+            cur<-cur+w/poids
           }
-          pos <- pos+largeur_bar/poids
+          next
         }
+        val<-valeurs[[champ]]
+        if(is.null(val)||length(val)!=1L||is.na(val)||!nzchar(val)) next
+        pt<-suppressWarnings(as.numeric(q$taille_pt[1]));if(!is.finite(pt)||pt<=0)pt<-7
+        align<-as.character(q$alignement[1]);adj<-if(align=="droite")1 else if(align=="centre")0.5 else 0
+        maxchar<-max(1,floor(w/max(.4,pt*.21)))
+        if(nchar(val)>maxchar) val<-paste0(substr(val,1,max(1,maxchar-1)),"…")
+        gras<-suppressWarnings(as.numeric(q$gras[1]))
+        text(xx+adj*w,yy+h/2,val,adj=c(adj,.5),cex=pt/12,
+             font=if(length(gras)==1L&&!is.na(gras)&&gras==1)2 else 1)
       }
-      if(is.null(barcode_layout)) {
-        dessiner_code("code_barre",3,38.5,94)
-      } else {
-        b <- barcode_layout$first
-        dessiner_code(b$field,b$x,b$y/2,b$w,b$h)
-        if(isTRUE(barcode_layout$second_active)) {
-          b <- barcode_layout$second
-          dessiner_code(b$field,b$x,b$y/2,b$w,b$h)
-        }
-      }
-      text(X(50),Y(36.3),paste0("BC# ",z$code_barre),cex=.72*facteur,font=2)
-      text(X(4),Y(32.7),z$numero_specimen,adj=0,cex=.76*facteur,font=2)
-      text(X(96),Y(32.7),paste0("DOSSIER ",z$numero_dossier),adj=1,cex=.70*facteur,font=2)
-      text(X(4),Y(28.6),paste0(z$nom,", ",z$prenom),adj=0,cex=.76*facteur,font=2)
-      text(X(96),Y(28.6),paste0("SEXE: ",z$sexe),adj=1,cex=.66*facteur)
-      text(X(4),Y(24.5),paste0("MED ",z$medicare),adj=0,cex=.64*facteur)
-      text(X(96),Y(24.5),paste0("LOC ",z$location),adj=1,cex=.64*facteur)
-      text(X(4),Y(20.3),paste0("# TUBES: ",z$quantite),adj=0,cex=.66*facteur,font=2)
-      text(X(96),Y(20.3),z$contenant,adj=1,cex=.62*facteur,font=2)
-      aa <- gsub(" | ",", ",z$analyses,fixed=TRUE)
-      text(X(4),Y(15.7),paste0("ANALYSES: ",aa),adj=0,cex=.54*facteur,font=2)
-      text(X(96),Y(10.8),paste0("REQ ",z$numero_requisition),adj=1,cex=.48*facteur)
-      text(X(4),Y(10.8),paste0("SAISI PAR: ",z$saisi_nom_complet),adj=0,cex=.42*facteur,font=2)
-      text(X(4),Y(7.4),paste0("DATE/HEURE: ",z$date_saisie),adj=0,cex=.39*facteur)
-      text(X(96),Y(7.4),paste0("SIGNATURE: ",z$signature_initiales),adj=1,cex=.42*facteur,font=3)
     }
 
     for (i in seq_len(nrow(labels))) {
@@ -5261,7 +5570,57 @@ server <- function(input, output, session) {
     creer_pdf_planche_partagee(labels,fichier,imp,debut,barcode_layout=layout)
   }
 
+  nom_pdf_saisie_etiquettes <- function() {
+    u<-utilisateur_connecte()
+    nettoyer<-function(x) {
+      x<-if(length(x)==0L||is.na(x[1])) "" else as.character(x[1])
+      x<-iconv(x,to="ASCII//TRANSLIT",sub="")
+      x<-gsub("[^A-Za-z0-9]+","_",x)
+      gsub("^_+|_+$","",x)
+    }
+    nom<-nettoyer(u$nom);prenom<-nettoyer(u$prenom)
+    if(!nzchar(nom))nom<-"Utilisateur"
+    if(!nzchar(prenom))prenom<-"Inconnu"
+    paste0("SLM_LPTL1078_",nom,"_",prenom,".pdf")
+  }
+
+  # Source unique des analyses pour toutes les impressions et réimpressions.
+  # LIME/J OR signifie LIME OU JAUNE OR (choix alternatif, pas deux tubes obligatoires).
+  edusillab_completer_analyses_etiquettes <- function(labels, con) {
+    if (is.null(labels) || !nrow(labels) || !"code_barre" %in% names(labels)) return(labels)
+    if (!"analyses" %in% names(labels)) labels$analyses <- ""
+    codes <- unique(as.character(labels$code_barre))
+    codes <- codes[!is.na(codes) & nzchar(codes)]
+    if (!length(codes)) return(labels)
+    ph <- paste(rep("?", length(codes)), collapse=",")
+    assoc <- db_query(con, paste0(
+      "SELECT s.code_barre, a.mnemonique FROM specimens s ",
+      "JOIN specimen_analyses sa ON sa.specimen_id=s.id ",
+      "JOIN analyses a ON a.id=sa.analyse_id ",
+      "WHERE s.code_barre IN (",ph,") ORDER BY s.id,a.mnemonique"
+    ), params=as.list(codes))
+    if (nrow(assoc)) for (bc in unique(as.character(assoc$code_barre))) {
+      tests <- unique(trimws(as.character(assoc$mnemonique[assoc$code_barre==bc])))
+      tests <- tests[!is.na(tests) & nzchar(tests)]
+      if (length(tests)) labels$analyses[as.character(labels$code_barre)==bc] <- paste(tests,collapse=", ")
+    }
+    # Chaque code-barres correspond a un seul tube, 9 analyses au maximum.
+    # Une incoherence en base ne doit pas produire une etiquette trompeuse.
+    for (bc in codes) {
+      codes_tube <- unique(trimws(unlist(strsplit(as.character(labels$analyses[match(bc,as.character(labels$code_barre))]), ",", fixed=TRUE))))
+      codes_tube <- codes_tube[nzchar(codes_tube)]
+      if (length(codes_tube)>9L) stop(paste0("Plus de 9 analyses pour le tube ",bc," : corriger la repartition avant impression."))
+    }
+    labels
+  }
+
   creer_pdf_partage_ou_individuel <- function(labels, fichier, con, utilisateur_id=NA_integer_) {
+    labels <- edusillab_completer_analyses_etiquettes(labels, con)
+    # Plusieurs impressions du même tube : duplication de l'étiquette, jamais du spécimen.
+    copies <- suppressWarnings(as.integer(input$etiquettes_copies %||% 1L))
+    if(length(copies)!=1L || is.na(copies) || copies<1L) copies <- 1L
+    copies <- min(copies,100L)
+    if(copies>1L && nrow(labels)>0L) labels <- labels[rep(seq_len(nrow(labels)),each=copies),,drop=FALSE]
     imp <- db_query(con, "
       SELECT * FROM materiel_impression
       WHERE actif=1
@@ -5316,6 +5675,10 @@ server <- function(input, output, session) {
   }
 
   creer_pdf_selon_imprimante <- function(labels,fichier,con=NULL) {
+    own_con <- is.null(con)
+    if (own_con) con <- ouvrir_db()
+    if (own_con) on.exit(DBI::dbDisconnect(con),add=TRUE)
+    labels <- edusillab_completer_analyses_etiquettes(labels,con)
     p <- parametres_impression(con)
     creer_pdf_etiquettes(
       labels,fichier,
@@ -5610,6 +5973,9 @@ server <- function(input, output, session) {
         if (u$perm_historique == 1)
           actionButton("menu_historique", "◷  Historique"),
 
+        if (toupper(u$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+          actionButton("menu_edu_correction", "✓  Correction étudiants / ZIP"),
+
         if (u$perm_utilisateurs == 1)
           actionButton("menu_utilisateurs", "♣  Utilisateurs"),
 
@@ -5857,6 +6223,33 @@ server <- function(input, output, session) {
       )
     }
 
+
+    if (page_active() == "edu_correction") {
+      req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+      return(tagList(
+        h2("Correction des saisies - Requisitions pedagogiques"),
+        p("Les saisies originales sont conservees. Les corrections sont stockees separement dans Neon/SQLite."),
+        fluidRow(column(6,uiOutput("edu_corr_etudiants_ui")),column(6,uiOutput("edu_corr_exercices_ui"))),
+        h4("Comparaison des analyses attendues et saisies"),
+        DT::DTOutput("edu_corr_comparaison"),
+        hr(),h4("Ajouter une erreur ou une correction"),
+        textInput("edu_corr_categorie","Element evalue",placeholder="Ex. Priorite, analyse, identification"),
+        textAreaInput("edu_corr_saisie","Saisie de l'etudiant"),
+        textAreaInput("edu_corr_attendue","Correction attendue"),
+        textAreaInput("edu_corr_commentaire","Commentaire du professeur"),
+        actionButton("edu_corr_ajouter","Enregistrer cette erreur",class="btn-primary"),
+        DT::DTOutput("edu_corr_lignes"),
+        hr(),textInput("edu_corr_note","Note (facultative)"),
+        textAreaInput("edu_corr_general","Commentaire general"),
+        actionButton("edu_corr_enregistrer","Enregistrer la correction",class="btn-success"),
+        br(),br(),downloadButton("edu_corr_pdf","Telecharger le PDF de correction"),
+        hr(),h4("Export ZIP des corrections"),
+        p("Exporter les fiches PDF de l'etudiant selectionne, ou de tous les etudiants."),
+        radioButtons("edu_corr_portee","Dossiers a inclure",choices=c("Etudiant selectionne"="etudiant","Tous les etudiants"="tous"),inline=TRUE),
+        downloadButton("edu_corr_zip","Telecharger les corrections en ZIP")
+      ))
+    }
+
     if (page_active() == "repertoire") {
       return(tagList(
         wellPanel(
@@ -5979,8 +6372,8 @@ server <- function(input, output, session) {
           ),
           uiOutput("creation_alertes_admin"),
           div(class="info-box",
-              "Cette page est réservée à l'administrateur. Choisissez le patient et l'étudiant, ",
-              "puis cochez les analyses demandées sur le modèle de réquisition pédagogique."),
+              "Sélectionnez un ou plusieurs patients et étudiants. Les mêmes analyses seront appliquées à chaque patient, ",
+              "avec une réquisition pédagogique indépendante pour chaque combinaison patient-étudiant."),
           fluidRow(
             column(6,uiOutput("creation_req_patient_ui")),
             column(6,uiOutput("creation_req_etudiant_ui"))
@@ -6047,9 +6440,32 @@ server <- function(input, output, session) {
               strong("Important : "),
               "les analyses cochées ici sont les réponses attendues de l'exercice. ",
               "Elles ne sont pas affichées à l'étudiant."),
+          radioButtons("creation_req_mode",
+            "Mode de création",
+            choices=c("Créer les réquisitions maintenant et attribuer les étudiants plus tard"="differe",
+                      "Créer et attribuer immédiatement aux étudiants sélectionnés"="immediat"),
+            selected="differe"),
           actionButton("creation_req_attribuer",
-                       "Créer et attribuer la réquisition",
+                       "Créer les réquisitions / Créer et attribuer",
                        class="btn-success"),
+          hr(),
+          h3("Attribution ultérieure des réquisitions"),
+          p("Sélectionnez une ou plusieurs réquisitions en attente, puis un ou plusieurs étudiants. Chaque étudiant reçoit un exercice indépendant pour chaque patient."),
+          uiOutput("creation_req_attente_ui"),
+          actionButton("creation_req_attribution_differee","Attribuer les réquisitions sélectionnées",class="btn-primary"),
+          br(),br(),
+          h4("Exporter les patients attribués aux étudiants"),
+          p("Télécharger un fichier CSV contenant les étudiants, les patients, les réquisitions et leur statut. Un patient attribué à plusieurs étudiants apparaît une fois par attribution."),
+          dateRangeInput("creation_attributions_intervalle", "Intervalle des dates d'attribution (Du / Au)",
+                         start=Sys.Date()-30, end=Sys.Date(), format="yyyy-mm-dd", separator=" au "),
+          checkboxInput("creation_attributions_toutes_dates", "Toutes les dates", value=TRUE),
+          downloadButton("creation_req_export_attributions", "Télécharger les attributions (CSV)"),
+          downloadButton("creation_req_export_attributions_pdf", "Télécharger les attributions (PDF)"),
+          hr(),
+          h4("Télécharger plusieurs réquisitions créées en une fois"),
+          p("Cochez les réquisitions souhaitées puis téléchargez un ZIP unique. Ne lancez plus plusieurs téléchargements PDF successifs."),
+          uiOutput("creation_req_zip_multi_ui"),
+          downloadButton("creation_req_zip_multi_download", "Télécharger les PDF sélectionnés (ZIP)"),
           br(),br(),
           uiOutput("creation_req_message"),
           uiOutput("creation_req_pdf_zone"),
@@ -6276,7 +6692,8 @@ server <- function(input, output, session) {
             class = "btn-success"
           ),
           br(), br(),
-          uiOutput("req_message")
+          uiOutput("req_message"),
+          uiOutput("req_pdf_etiquettes_disponible")
         )
       )
     }
@@ -7178,7 +7595,7 @@ server <- function(input, output, session) {
             column(3,numericInput("mat_pas_x","Pas horizontal (mm)",69.85,min=1,max=300)),
             column(3,numericInput("mat_pas_y","Pas vertical (mm)",25.4,min=1,max=300)),
             uiOutput("mat_controle_chevauchement"),
-            column(12,helpText("Avery 5160 : feuille Letter 215,9 × 279,4 mm; étiquette 66,675 × 25,4 mm; 3 colonnes × 10 lignes. La planche partagée mémorise automatiquement la prochaine case libre. Orientation Portrait ou Paysage disponible.")),
+            column(12,helpText("Toutes les dimensions sont configurées manuellement en mm. Aucun format d'étiquette n'est imposé. La planche partagée est facultative.")),
             column(3,selectInput("mat_ajustement","Ajustement étiquette",
               choices=c("Automatique"="AUTO","Manuel"="MANUEL"))),
             column(3,checkboxInput("mat_defaut","Matériel par défaut",TRUE))
@@ -7192,6 +7609,53 @@ server <- function(input, output, session) {
           p(class="text-muted",
             "Automatique : taille de l'imprimante, sans décalage. Manuel : ajustez les offsets et l'échelle pour aligner l'étiquette."),
           uiOutput("mat_message")),
+
+          div(class="well",h4("Disposition du contenu des etiquettes (mm)"),
+            p("Selectionnez une imprimante, puis un champ. Toutes les positions et dimensions sont en millimetres; la police est en points."),
+            selectInput("mat_champ_layout","Champ a configurer",choices=c("Code-barres"="code_barre","Numéro code-barres"="code","Numéro spécimen"="specimen","Dossier"="dossier","Nom et prénom"="patient","Date de naissance"="naissance","Sexe"="sexe","Medicare"="medicare","Localisation"="location","Nombre de tubes"="tubes","Contenant"="contenant","Analyses"="analyses","Réquisition"="requisition","Saisi par"="saisie","Date et heure"="date","Signature"="signature")),
+            fluidRow(column(2,numericInput("mat_champ_x","X (mm)",3,step=.5)),column(2,numericInput("mat_champ_y","Y (mm)",3,step=.5)),column(2,numericInput("mat_champ_w","Largeur (mm)",50,min=.1,step=.5)),column(2,numericInput("mat_champ_h","Hauteur (mm)",5,min=.1,step=.5)),column(2,numericInput("mat_champ_pt","Police (pt)",8,min=1,step=.5)),column(2,selectInput("mat_champ_align","Alignement",choices=c("Gauche"="gauche","Centre"="centre","Droite"="droite")))),
+            checkboxInput("mat_champ_visible","Afficher le champ",TRUE),checkboxInput("mat_champ_gras","Texte en gras",FALSE),
+            actionButton("mat_champ_enregistrer","Enregistrer la position du champ",class="btn-primary"),
+            hr(),h4("Champs entièrement personnalisables"),
+            p("Ajoutez du texte libre, puis déplacez-le et redimensionnez-le dans l'aperçu. Le contenu et les dimensions sont conservés dans la base."),
+            textInput("mat_libre_nom","Nom du nouveau champ",placeholder="Ex. Instruction"),
+            textInput("mat_libre_texte","Texte à imprimer",placeholder="Ex. À jeun"),
+            actionButton("mat_libre_ajouter","Ajouter le champ"),
+            actionButton("mat_libre_supprimer","Supprimer le champ sélectionné",class="btn-outline-danger"),
+            h4("Aperçu de l'étiquette (mise à jour immédiate)"),
+            p("Aperçu indicatif aux dimensions et positions saisies. Les modifications deviennent permanentes après enregistrement."),
+
+    tags$script(HTML("(function(){
+      if(window.edusillabMouseEditorInstalled)return;window.edusillabMouseEditorInstalled=true;
+      var current=null;
+      function num(v){return parseFloat(v)||0;}
+      document.addEventListener('pointerdown',function(e){
+        var el=e.target.closest('.edusillab-edit-field');if(!el)return;
+        var box=el.closest('.edusillab-edit-canvas');if(!box)return;
+        var handle=e.target.closest('.edusillab-resize-handle');
+        current={el:el,box:box,startX:e.clientX,startY:e.clientY,x:num(el.dataset.x),y:num(el.dataset.y),w:num(el.dataset.w),h:num(el.dataset.h),scale:num(box.dataset.scale)||1,resize:!!handle};
+        e.preventDefault();
+      });
+      document.addEventListener('pointermove',function(e){
+        if(!current)return;
+        var c=current,dx=(e.clientX-c.startX)/c.scale,dy=(e.clientY-c.startY)/c.scale;
+        var x=c.x,y=c.y,w=c.w,h=c.h;
+        if(c.resize){w=Math.max(1,c.w+dx);h=Math.max(1,c.h+dy);}else{x=Math.max(0,c.x+dx);y=Math.max(0,c.y+dy);}
+        c.el.style.left=(x*c.scale)+'px';c.el.style.top=(y*c.scale)+'px';c.el.style.width=(w*c.scale)+'px';c.el.style.height=(h*c.scale)+'px';
+      });
+      document.addEventListener('pointerup',function(e){
+        if(!current)return;var c=current;current=null;
+        var dx=(e.clientX-c.startX)/c.scale,dy=(e.clientY-c.startY)/c.scale;
+        var v={champ:c.el.dataset.champ,x:Math.round((c.resize?c.x:Math.max(0,c.x+dx))*10)/10,y:Math.round((c.resize?c.y:Math.max(0,c.y+dy))*10)/10,w:Math.round((c.resize?Math.max(1,c.w+dx):c.w)*10)/10,h:Math.round((c.resize?Math.max(1,c.h+dy):c.h)*10)/10,nonce:Date.now()};
+        if(window.Shiny&&Shiny.setInputValue)Shiny.setInputValue('mat_champ_souris',v,{priority:'event'});
+      });
+    })();")),
+            p("Glissez un champ avec la souris pour le déplacer. Tirez le coin inférieur droit pour modifier sa largeur et sa hauteur. Enregistrez ensuite la position."),
+            uiOutput("mat_apercu_contenu_mm"),
+            helpText("Ces reglages s'appliquent a la creation et a la reimpression des etiquettes de l'imprimante par defaut.")),
+          div(class="well",h4("Copies d'étiquettes pour un même prélèvement"),
+            numericInput("etiquettes_copies","Nombre de copies identiques par étiquette",1,min=1,max=100,step=1),
+            p("Exemple : 4 copies sur la même planche, remplies colonne par colonne si le mode planche est activé. Chaque copie conserve le même code-barres : aucun nouveau prélèvement n'est créé.")),
           hr(),
           tags$div(id="edusillab-planche-etiquettes",style="margin:16px 0;padding:14px;border:2px solid #2d6da3;border-radius:8px;background:#f5f9ff;",
             h3("CONFIGURATION ET APERÇU VISUEL DES PLANCHES D’ÉTIQUETTES"),
@@ -7641,6 +8105,10 @@ server <- function(input, output, session) {
   # NAVIGATION
   # ----------------------------------------------------------
 
+  observeEvent(input$menu_edu_correction, {
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    page_active("edu_correction")
+  })
   observeEvent(input$accueil, page_active("accueil"))
   observeEvent(input$menu_aide, page_active("aide"))
   observeEvent(input$menu_parametres, {
@@ -12033,6 +12501,125 @@ server <- function(input, output, session) {
   # MATÉRIEL / IMPRIMANTES
   # ----------------------------------------------------------
 
+
+  mat_custom_refresh <- shiny::reactiveVal(0L)
+  observeEvent(list(mat_custom_refresh(),mat_selection_id()),{
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id<-mat_selection_id();if(is.null(id)){q<-db_query(con,"SELECT id FROM materiel_impression ORDER BY par_defaut DESC,id LIMIT 1");if(!nrow(q))return();id<-q$id[1]}
+    base<-c("Code-barres"="code_barre","Numéro code-barres"="code","Numéro spécimen"="specimen","Dossier"="dossier","Nom et prénom"="patient","Date de naissance"="naissance","Sexe"="sexe","Medicare"="medicare","Localisation"="location","Nombre de tubes"="tubes","Contenant"="contenant","Analyses"="analyses","Réquisition"="requisition","Saisi par"="saisie","Date et heure"="date","Signature"="signature")
+    custom<-edusillab_champs_personnalises(con,id)
+    if(nrow(custom)) base<-c(base,stats::setNames(as.character(custom$champ),paste0("Libre : ",custom$libelle)))
+    updateSelectInput(session,"mat_champ_layout",choices=base,selected=isolate(input$mat_champ_layout %||% "code_barre"))
+  })
+  observeEvent(input$mat_libre_ajouter,{
+    req(utilisateur_connecte()$perm_utilisateurs==1)
+    nom<-trimws(input$mat_libre_nom %||% "");val<-trimws(input$mat_libre_texte %||% "")
+    if(!nzchar(nom)||!nzchar(val)){showNotification("Indiquez un nom et un texte.",type="warning");return()}
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id<-mat_selection_id();if(is.null(id)){q<-db_query(con,"SELECT id FROM materiel_impression ORDER BY par_defaut DESC,id LIMIT 1");if(!nrow(q))return();id<-q$id[1]}
+    edusillab_champs_personnalises(con,id)
+    key<-paste0("libre_",as.integer(as.numeric(Sys.time())),"_",sample.int(99999,1))
+    db_execute(con,"INSERT INTO etiquette_textes_libres(imprimante_id,champ,libelle) VALUES(?,?,?)",params=list(id,key,paste0(nom," : ",val)))
+    db_execute(con,"INSERT INTO etiquette_champs_mm(imprimante_id,champ,x_mm,y_mm,largeur_mm,hauteur_mm,taille_pt,visible,gras,alignement) VALUES(?,?,?,?,?,?,?,?,?,?)",params=list(id,key,3,3,45,5,8,1,0,"gauche"))
+    mat_custom_refresh(mat_custom_refresh()+1L)
+    updateSelectInput(session,"mat_champ_layout",selected=key)
+    showNotification("Champ ajouté. Déplacez-le puis enregistrez sa position.",type="message")
+  })
+  observeEvent(input$mat_libre_supprimer,{
+    req(utilisateur_connecte()$perm_utilisateurs==1)
+    key<-input$mat_champ_layout %||% "";if(!startsWith(key,"libre_")) {showNotification("Sélectionnez un champ libre.",type="warning");return()}
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id<-mat_selection_id();if(is.null(id)){q<-db_query(con,"SELECT id FROM materiel_impression ORDER BY par_defaut DESC,id LIMIT 1");if(!nrow(q))return();id<-q$id[1]}
+    db_execute(con,"DELETE FROM etiquette_textes_libres WHERE imprimante_id=? AND champ=?",params=list(id,key))
+    db_execute(con,"DELETE FROM etiquette_champs_mm WHERE imprimante_id=? AND champ=?",params=list(id,key))
+    mat_custom_refresh(mat_custom_refresh()+1L)
+    updateSelectInput(session,"mat_champ_layout",selected="patient")
+  })
+  observeEvent(input$mat_champ_souris,{
+    z <- input$mat_champ_souris
+    if(is.null(z$champ)) return()
+    if(!identical(input$mat_champ_layout,z$champ)) updateSelectInput(session,"mat_champ_layout",selected=z$champ)
+    updateNumericInput(session,"mat_champ_x",value=z$x)
+    updateNumericInput(session,"mat_champ_y",value=z$y)
+    updateNumericInput(session,"mat_champ_w",value=z$w)
+    updateNumericInput(session,"mat_champ_h",value=z$h)
+  })
+  observeEvent(input$mat_champ_layout,{
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id<-mat_selection_id();if(is.null(id)){d<-db_query(con,"SELECT id FROM materiel_impression ORDER BY par_defaut DESC,id LIMIT 1");if(!nrow(d))return();id<-d$id[1]}
+    z<-edusillab_layout_imprimante(con,id);z<-z[z$champ==input$mat_champ_layout,,drop=FALSE];if(!nrow(z))return()
+    for(pair in list(c("mat_champ_x","x_mm"),c("mat_champ_y","y_mm"),c("mat_champ_w","largeur_mm"),c("mat_champ_h","hauteur_mm"),c("mat_champ_pt","taille_pt")))updateNumericInput(session,pair[1],value=as.numeric(z[[pair[2]]][1]))
+    updateCheckboxInput(session,"mat_champ_visible",value=as.numeric(z$visible[1])==1)
+    updateCheckboxInput(session,"mat_champ_gras",value=as.numeric(z$gras[1])==1)
+    updateSelectInput(session,"mat_champ_align",selected=as.character(z$alignement[1]))
+  })
+  observeEvent(input$mat_champ_enregistrer,{
+    req(utilisateur_connecte()$perm_utilisateurs==1)
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id<-mat_selection_id();if(is.null(id)){d<-db_query(con,"SELECT id FROM materiel_impression ORDER BY par_defaut DESC,id LIMIT 1");if(!nrow(d)){showNotification("Enregistrez d'abord une imprimante",type="warning");return()};id<-d$id[1]}
+    nums<-as.numeric(c(input$mat_champ_x,input$mat_champ_y,input$mat_champ_w,input$mat_champ_h,input$mat_champ_pt))
+    if(any(!is.finite(nums))||any(nums[3:5]<=0)){showNotification("Dimensions ou taille invalides",type="error");return()}
+    db_execute(con,"INSERT INTO etiquette_champs_mm(imprimante_id,champ,x_mm,y_mm,largeur_mm,hauteur_mm,taille_pt,visible,gras,alignement) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(imprimante_id,champ) DO UPDATE SET x_mm=excluded.x_mm,y_mm=excluded.y_mm,largeur_mm=excluded.largeur_mm,hauteur_mm=excluded.hauteur_mm,taille_pt=excluded.taille_pt,visible=excluded.visible,gras=excluded.gras,alignement=excluded.alignement",params=c(list(id,input$mat_champ_layout),as.list(nums),list(as.integer(isTRUE(input$mat_champ_visible)),as.integer(isTRUE(input$mat_champ_gras)),input$mat_champ_align)))
+    showNotification("Disposition du champ enregistree",type="message")
+  })
+
+  output$mat_apercu_contenu_mm <- renderUI({
+    tryCatch({
+    mat_custom_refresh()
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    id <- mat_selection_id()
+    if(is.null(id)) {
+      d <- db_query(con,"SELECT id FROM materiel_impression WHERE actif=1 ORDER BY par_defaut DESC,id LIMIT 1")
+      if(!nrow(d)) return(p("Enregistrez d'abord une imprimante."))
+      id <- d$id[1]
+    }
+    imp <- db_query(con,"SELECT largeur_mm,hauteur_mm FROM materiel_impression WHERE id=?",params=list(id))
+    if(!nrow(imp)) return(NULL)
+    w <- as.numeric(imp$largeur_mm[1]);h <- as.numeric(imp$hauteur_mm[1])
+    if(!is.finite(w)||!is.finite(h)||w<=0||h<=0) return(p("Dimensions invalides."))
+    lay <- edusillab_layout_imprimante(con,id)
+    selected <- which(lay$champ == (input$mat_champ_layout %||% "code_barre"))
+    if(length(selected)==1) {
+      j <- selected[1]
+      lay$x_mm[j] <- input$mat_champ_x %||% lay$x_mm[j]
+      lay$y_mm[j] <- input$mat_champ_y %||% lay$y_mm[j]
+      lay$largeur_mm[j] <- input$mat_champ_w %||% lay$largeur_mm[j]
+      lay$hauteur_mm[j] <- input$mat_champ_h %||% lay$hauteur_mm[j]
+      lay$taille_pt[j] <- input$mat_champ_pt %||% lay$taille_pt[j]
+      lay$visible[j] <- as.integer(isTRUE(input$mat_champ_visible))
+      lay$gras[j] <- as.integer(isTRUE(input$mat_champ_gras))
+      lay$alignement[j] <- input$mat_champ_align %||% "gauche"
+    }
+    examples <- c(code_barre="▌▌ ▌ ▌▌ ▌ ▌▌▌ ▌▌",code="BC# 123456",specimen="1710:C00001R",dossier="DOSSIER 123456",patient="NOM, PRÉNOM",naissance="NAISSANCE 2000-01-01",sexe="SEXE F",medicare="MED 123456789",location="LOC CCNB",tubes="# TUBES 2",contenant="JAUNE OR",analyses="ANALYSES: ALB, GLU, NA",requisition="REQ 1234567890",saisie="SAISI PAR: ÉTUDIANT",date="DATE/HEURE",signature="SIGNATURE: AB")
+    custom<-edusillab_champs_personnalises(con,id)
+    if(nrow(custom)) for(k in seq_len(nrow(custom))) examples[as.character(custom$champ[k])]<-as.character(custom$libelle[k])
+    scale <- min(7,720/w)
+    fields <- lapply(seq_len(nrow(lay)),function(i) {
+      q <- lay[i,]
+      if(length(q$visible)!=1L || is.na(q$visible) || !isTRUE(suppressWarnings(as.numeric(q$visible)==1))) return(NULL)
+      x<-as.numeric(q$x_mm);y<-as.numeric(q$y_mm);fw<-as.numeric(q$largeur_mm);fh<-as.numeric(q$hauteur_mm)
+      if(any(!is.finite(c(x,y,fw,fh)))) return(NULL)
+      selected_field <- i %in% selected
+      tags$div(class=if(selected_field) "edusillab-edit-field" else "",
+        `data-champ`=as.character(q$champ),`data-x`=x,`data-y`=y,`data-w`=fw,`data-h`=fh,
+        style=paste0("position:absolute;box-sizing:border-box;overflow:hidden;white-space:nowrap;",
+        "left:",x*scale,"px;top:",y*scale,"px;width:",fw*scale,"px;height:",fh*scale,"px;",
+        "font-size:",max(5,as.numeric(q$taille_pt)),"pt;line-height:1.15;",
+        "text-align:",switch(as.character(q$alignement),centre="center",droite="right","left"),";",
+        "font-weight:",if(isTRUE(suppressWarnings(as.numeric(q$gras)==1))) "bold" else "normal",";",
+        if(selected_field) "outline:2px dashed #e87d20;background:#fff1d8;cursor:move;touch-action:none;" else ""),
+        if(identical(as.character(q$champ),"code_barre")) tags$span(style="font-family:monospace;letter-spacing:1px;",examples[[as.character(q$champ)]] %||% "") else (examples[[as.character(q$champ)]] %||% ""),
+        if(selected_field) tags$div(class="edusillab-resize-handle",style="position:absolute;right:0;bottom:0;width:11px;height:11px;background:#e87d20;cursor:nwse-resize;touch-action:none;"))
+    })
+    tagList(tags$div(class="edusillab-edit-canvas",`data-scale`=scale,style=paste0("position:relative;overflow:hidden;background:white;border:1px solid #333;",
+       "width:",w*scale,"px;height:",h*scale,"px;max-width:100%;"),fields),
+       tags$small(sprintf("Dimensions : %.2f × %.2f mm. Aperçu à l'écran uniquement; vérifier le PDF à l'impression.",w,h)))
+     }, error=function(e) {
+      message("EDUSILLAB aperçu étiquette : ", conditionMessage(e))
+      tags$div(class="alert alert-warning", "Aperçu indisponible : ", conditionMessage(e),
+        tags$p("Les paramètres d'étiquettes peuvent toujours être enregistrés."))
+    })
+  })
   output$table_materiel <- DT::renderDT({
     refresh_materiel()
     con <- ouvrir_db()
@@ -13802,12 +14389,12 @@ server <- function(input, output, session) {
 
   observeEvent(input$creation_modele_id,{
     mid <- suppressWarnings(as.integer(input$creation_modele_id))
-    if(!is.na(mid)) try(initialiser_champs_patient_modele(mid),silent=TRUE)
+    if(length(mid)==1L && !is.na(mid)) try(initialiser_champs_patient_modele(mid),silent=TRUE)
   },ignoreInit=FALSE)
 
   output$creation_modele_champs_patient_ui <- renderUI({
     mid <- suppressWarnings(as.integer(input$creation_modele_id))
-    if(is.na(mid)) return(NULL)
+    if(length(mid)!=1L || is.na(mid)) return(NULL)
     try(initialiser_champs_patient_modele(mid),silent=TRUE)
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     d <- tryCatch(db_query(con,"
@@ -13874,13 +14461,8 @@ server <- function(input, output, session) {
 
   output$creation_modele_mapping_ui <- renderUI({
     mid <- suppressWarnings(as.integer(input$creation_modele_id))
-    if(is.na(mid)) return(NULL)
+    if(length(mid)!=1L || is.na(mid)) return(NULL)
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
-
-    a <- tryCatch(db_query(con,"
-      SELECT id,mnemonique,nom FROM analyses
-      WHERE actif=1 ORDER BY mnemonique"),error=function(e)data.frame())
-    if(nrow(a)==0) return(NULL)
 
     map <- tryCatch(db_query(con,"
       SELECT rmt.id,rmt.analyse_id,rmt.code_externe,rmt.libelle_externe,
@@ -13900,9 +14482,8 @@ server <- function(input, output, session) {
       fluidRow(
         column(5,
           selectizeInput("mapping_analyse_id","Analyse Vitalité",
-            choices=setNames(as.character(a$id),
-              paste0(a$mnemonique," — ",a$nom)),
-            options=list(placeholder="Choisir une analyse"))),
+            choices=NULL,
+            options=list(placeholder="Rechercher par mnémonique ou nom",maxOptions=50))),
         column(3,textInput("mapping_code_externe","Code sur la réquisition",
                            placeholder="Ex. CBC")),
         column(4,textInput("mapping_libelle_externe","Terme externe / anglais",
@@ -13934,6 +14515,22 @@ server <- function(input, output, session) {
         )
     )
   })
+
+  # Liste Selectize côté serveur : les milliers d'analyses ne sont pas
+  # transmises au navigateur lors de la création du formulaire.
+  observeEvent(input$creation_modele_id, {
+    mid_mapping <- suppressWarnings(as.integer(input$creation_modele_id))
+    if (length(mid_mapping) != 1L || is.na(mid_mapping)) return()
+    con_mapping <- ouvrir_db()
+    on.exit(DBI::dbDisconnect(con_mapping), add=TRUE)
+    analyses_mapping <- db_query(con_mapping,
+      "SELECT id, mnemonique, nom FROM analyses WHERE actif=1 ORDER BY mnemonique")
+    choix_mapping <- stats::setNames(
+      as.character(analyses_mapping$id),
+      paste0(analyses_mapping$mnemonique, " — ", analyses_mapping$nom))
+    updateSelectizeInput(session, "mapping_analyse_id",
+      choices=choix_mapping, server=TRUE)
+  }, ignoreInit=FALSE)
 
   observeEvent(input$mapping_ajouter,{
     mid <- suppressWarnings(as.integer(input$creation_modele_id))
@@ -14055,14 +14652,16 @@ server <- function(input, output, session) {
       paste0(p$nom,", ",p$prenom,
              " — Dossier ",ifelse(is.na(p$numero_dossier) | !nzchar(p$numero_dossier),"—",p$numero_dossier),
              " — Medicare ",ifelse(is.na(p$medicare) | !nzchar(p$medicare),"—",p$medicare)))
-    selectizeInput("creation_req_patient_id","Patient",
-      choices=choix,selected=NULL,
-      options=list(placeholder="Choisir un patient",maxOptions=5000))
+    selectizeInput("creation_req_patient_id","Patients (sélection multiple)",
+      choices=choix,selected=NULL,multiple=TRUE,
+      options=list(placeholder="Choisir un ou plusieurs patients",maxOptions=5000))
   })
 
   observeEvent(input$creation_req_patient_id,{
-    pid <- suppressWarnings(as.integer(input$creation_req_patient_id))
-    if(is.na(pid)) return()
+    pids <- suppressWarnings(as.integer(input$creation_req_patient_id %||% character(0)))
+    pids <- unique(pids[!is.na(pids)])
+    if(length(pids)!=1L) return()
+    pid <- pids[1]
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     p <- tryCatch(db_query(con,"
       SELECT adresse,ville,province,code_postal,pays
@@ -14078,8 +14677,10 @@ server <- function(input, output, session) {
   },ignoreInit=TRUE)
 
   output$creation_req_coordonnees_patient <- renderUI({
-    pid <- suppressWarnings(as.integer(input$creation_req_patient_id))
-    if(is.na(pid)) return(NULL)
+    pids <- suppressWarnings(as.integer(input$creation_req_patient_id %||% character(0)))
+    pids <- unique(pids[!is.na(pids)])
+    if(length(pids)!=1L) return(div(class="info-box",paste(length(pids),"patients sélectionnés. Les coordonnées sont propres à chaque dossier.")))
+    pid <- pids[1]
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     d <- tryCatch(db_query(con,"
       SELECT nom,prenom,adresse,ville,province,code_postal,pays
@@ -14308,18 +14909,265 @@ server <- function(input, output, session) {
     unique(c(routine[!is.na(routine)],autres[!is.na(autres)]))
   })
 
+  # Source commune CSV / PDF, filtrée sur la date d'attribution.
+  creation_attributions_donnees <- function() {
+    if(!toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+      stop("Export réservé aux administrateurs et superutilisateurs.")
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    sql <- "SELECT re.id AS numero_exercice,
+        u.identifiant AS identifiant_etudiant, u.nom AS nom_etudiant,
+        u.prenom AS prenom_etudiant, p.numero_dossier AS numero_dossier_patient,
+        p.nom AS nom_patient, p.prenom AS prenom_patient,
+        re.requisition_id AS identifiant_requisition,
+        r.numero_requisition AS numero_requisition,
+        re.statut AS statut, re.date_attribution AS date_attribution,
+        re.date_completion AS date_completion
+      FROM requisition_exercices re
+      INNER JOIN patients p ON p.id=re.patient_id
+      INNER JOIN utilisateurs u ON u.id=re.etudiant_id
+      LEFT JOIN requisitions r ON r.id=re.requisition_id
+      WHERE re.statut <> 'EN_ATTENTE_ATTRIBUTION'"
+    params <- list()
+    if(!isTRUE(input$creation_attributions_toutes_dates)) {
+      dates <- input$creation_attributions_intervalle
+      if(is.null(dates) || length(dates)!=2 || any(is.na(dates)))
+        stop("Choisissez une date de début et une date de fin.")
+      if(as.Date(dates[1])>as.Date(dates[2])) stop("Intervalle de dates invalide.")
+      sql <- paste0(sql," AND CAST(re.date_attribution AS DATE)>=CAST(? AS DATE)",
+                         " AND CAST(re.date_attribution AS DATE)<=CAST(? AS DATE)")
+      params <- list(as.character(dates[1]),as.character(dates[2]))
+    }
+    sql <- paste0(sql," ORDER BY re.date_attribution DESC,u.nom,u.prenom,p.nom,p.prenom,re.id")
+    db_query(con,sql,params=params)
+  }
+
+  # Sélection multiple des réquisitions créées, indépendamment de leur statut.
+  output$creation_req_zip_multi_ui <- renderUI({
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d<-db_query(cn,"SELECT re.id,u.nom AS et_nom,u.prenom AS et_prenom,
+      p.nom AS pat_nom,p.prenom AS pat_prenom,re.statut
+      FROM requisition_exercices re
+      JOIN utilisateurs u ON u.id=re.etudiant_id
+      JOIN patients p ON p.id=re.patient_id
+      ORDER BY re.id DESC LIMIT 3000")
+    choix<-if(nrow(d)) setNames(as.character(d$id),paste0("#",d$id," | ",
+      d$et_prenom," ",d$et_nom," | Patient : ",d$pat_prenom," ",d$pat_nom,
+      " | ",d$statut)) else character()
+    tagList(
+      selectizeInput("creation_req_zip_multi_ids","Réquisitions créées à inclure",
+        choices=choix,multiple=TRUE,options=list(plugins=list("remove_button"),
+        placeholder="Sélectionnez plusieurs réquisitions",maxOptions=3000)),
+      actionButton("creation_req_zip_multi_tout","Sélectionner les 100 plus récentes"),
+      actionButton("creation_req_zip_multi_vider","Effacer la sélection")
+    )
+  })
+  observeEvent(input$creation_req_zip_multi_tout,{
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    ids<-db_query(cn,"SELECT id FROM requisition_exercices ORDER BY id DESC LIMIT 100")$id
+    updateSelectizeInput(session,"creation_req_zip_multi_ids",selected=as.character(ids))
+  })
+  observeEvent(input$creation_req_zip_multi_vider,{
+    updateSelectizeInput(session,"creation_req_zip_multi_ids",selected=character())
+  })
+  output$creation_req_zip_multi_download <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_requisitions_",format(Sys.Date(),"%Y%m%d"),".zip"),
+    contentType="application/zip",
+    content=function(file){
+      req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+      if(!requireNamespace("zip",quietly=TRUE))
+        stop("Le package zip est requis. Exécutez install.packages('zip') dans Posit Cloud.")
+      ids<-unique(suppressWarnings(as.integer(input$creation_req_zip_multi_ids %||% character())))
+      ids<-ids[!is.na(ids)]
+      if(!length(ids)) stop("Sélectionnez au moins une réquisition.")
+      if(length(ids)>30L) stop("Maximum 30 formulaires PDF par ZIP pour éviter une surcharge mémoire.")
+      cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+      td<-tempfile("edusillab_zip_");dir.create(td,recursive=TRUE)
+      on.exit(unlink(td,recursive=TRUE,force=TRUE),add=TRUE)
+      safe<-function(x) {
+        x<-iconv(as.character(x),to="ASCII//TRANSLIT",sub="")
+        x[is.na(x)]<-""
+        gsub("[^A-Za-z0-9_-]+","_",x)
+      }
+      noms<-character()
+      for(id in ids){
+        d<-db_query(cn,"SELECT u.nom AS en,u.prenom AS ep,p.nom AS pn,p.prenom AS pp
+          FROM requisition_exercices re JOIN utilisateurs u ON u.id=re.etudiant_id
+          JOIN patients p ON p.id=re.patient_id WHERE re.id=?",params=list(id))
+        if(nrow(d)!=1L) stop(paste("Réquisition introuvable :",id))
+        nom<-paste0(safe(d$en[1]),"_",safe(d$ep[1]),"__",
+          safe(d$pn[1]),"_",safe(d$pp[1]),"_REQ_",id,".pdf")
+        tryCatch(
+          edusillab_exporter_requisition_formulaire(id,file.path(td,nom)),
+          error=function(e) stop(sprintf("Réquisition #%s : %s",id,conditionMessage(e)))
+        )
+        gc(verbose=FALSE)
+        if(!file.exists(file.path(td,nom))) stop(paste("PDF non créé :",id))
+        noms<-c(noms,nom)
+      }
+      # zip::zipr évite la dépendance au programme ZIP du système.
+      zip::zipr(zipfile=normalizePath(file,mustWork=FALSE),files=noms,
+        root=td,include_directories=FALSE)
+      if(!file.exists(file)||is.na(file.info(file)$size)||file.info(file)$size<50)
+        stop("L'archive ZIP n'a pas pu être générée.")
+    }
+  )
+
+  output$creation_req_export_attributions <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_attributions_",format(Sys.Date(),"%Y-%m-%d"),".csv"),
+    content=function(file) {
+      utils::write.csv2(creation_attributions_donnees(),file,row.names=FALSE,na="",fileEncoding="UTF-8")
+    },contentType="text/csv"
+  )
+
+  output$creation_req_export_attributions_pdf <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_attributions_",format(Sys.Date(),"%Y-%m-%d"),".pdf"),
+    contentType="application/pdf",
+    content=function(file) {
+      d <- creation_attributions_donnees()
+      grDevices::pdf(file,width=11.7,height=8.3,paper="special",onefile=TRUE)
+      on.exit(grDevices::dev.off(),add=TRUE)
+      # Pagination sans package supplémentaire, orientation paysage A4.
+      npage <- max(1L,ceiling(nrow(d)/23))
+      for(page in seq_len(npage)) {
+        graphics::par(mar=c(0,0,0,0));graphics::plot.new()
+        graphics::plot.window(xlim=c(0,1),ylim=c(0,1))
+        graphics::text(.035,.955,"EDUSILLAB — Tableau des attributions",adj=0,font=2,cex=1.45)
+        periode <- if(isTRUE(input$creation_attributions_toutes_dates)) "Toutes les dates" else
+          paste(as.character(input$creation_attributions_intervalle),collapse=" au ")
+        graphics::text(.035,.915,paste0("Période : ",periode,"   |   Attributions : ",nrow(d),
+                                     "   |   Page ",page," / ",npage),adj=0,cex=.8)
+        headers <- c("Date","Étudiant","Patient","Dossier","Réquisition","Statut")
+        xx <- c(.04,.20,.40,.61,.73,.87)
+        graphics::rect(.025,.858,.985,.893,col="grey90",border=NA)
+        for(j in seq_along(headers)) graphics::text(xx[j],.875,headers[j],adj=0,font=2,cex=.75)
+        indices <- if(nrow(d)) seq.int((page-1L)*23L+1L,min(page*23L,nrow(d))) else integer()
+        for(k in seq_along(indices)) {
+          z <- d[indices[k],,drop=FALSE]; y <- .836-(k-1)*.033
+          val <- c(substr(as.character(z$date_attribution[1]),1,10),
+                   paste(z$prenom_etudiant[1],z$nom_etudiant[1]),
+                   paste(z$prenom_patient[1],z$nom_patient[1]),
+                   as.character(z$numero_dossier_patient[1]),
+                   as.character(z$numero_requisition[1]),as.character(z$statut[1]))
+          val[is.na(val)] <- ""
+          limits <- c(10,25,25,14,15,18)
+          for(j in seq_along(val)) graphics::text(xx[j],y,substr(val[j],1,limits[j]),adj=0,cex=.66)
+          graphics::segments(.03,y-.014,.98,y-.014,col="grey85")
+        }
+        if(!nrow(d)) graphics::text(.5,.7,"Aucune attribution pour la période sélectionnée.")
+      }
+    }
+  )
+
+  output$creation_req_attente_ui <- renderUI({
+    refresh_exercices_requisition()
+    con <- ouvrir_db(); on.exit(try(DBI::dbDisconnect(con),silent=TRUE),add=TRUE)
+    d <- tryCatch(db_query(con,
+      "SELECT re.id,p.nom,p.prenom,p.numero_dossier
+       FROM requisition_exercices re JOIN patients p ON p.id=re.patient_id
+       WHERE re.statut='EN_ATTENTE_ATTRIBUTION'
+       ORDER BY re.id DESC LIMIT 500"),error=function(e)data.frame())
+    if(!nrow(d)) return(div(class="info-box","Aucune réquisition en attente."))
+    choix <- setNames(as.character(d$id),
+      paste0("REQ #",d$id," — ",d$prenom," ",d$nom," — ",ifelse(is.na(d$numero_dossier),"",d$numero_dossier)))
+    selectizeInput("creation_req_attente_ids","Réquisitions à attribuer",
+      choices=choix,multiple=TRUE,options=list(plugins=list("remove_button")))
+  })
+
+  observeEvent(input$creation_req_attribution_differee,{
+    ids <- unique(suppressWarnings(as.integer(input$creation_req_attente_ids %||% character())))
+    ids <- ids[!is.na(ids)]
+    etudiants <- unique(suppressWarnings(as.integer(input$creation_req_etudiant_id %||% character())))
+    etudiants <- etudiants[!is.na(etudiants)]
+    if(!length(ids) || !length(etudiants)) {
+      showNotification("Sélectionnez les réquisitions en attente et les étudiants.",type="error"); return()
+    }
+    if(length(ids)*length(etudiants)>200L) {
+      showNotification("Limite de 200 attributions par opération.",type="error");return()
+    }
+    con <- ouvrir_db(); on.exit(try(DBI::dbDisconnect(con),silent=TRUE),add=TRUE)
+    transaction_ouverte <- FALSE
+    tryCatch({
+      db_begin_retry(con); transaction_ouverte <- TRUE
+      nb <- 0L
+      for(id in ids) {
+        source <- db_query(con,
+          "SELECT * FROM requisition_exercices WHERE id=? AND statut='EN_ATTENTE_ATTRIBUTION'",
+          params=list(id))
+        if(nrow(source)!=1L) stop(paste("Réquisition en attente introuvable :",id))
+        cols <- intersect(c("patient_id","etudiant_id","attribue_par","consigne","statut",
+          "modele_id","adresse_postale","ville_postale","province_postale","code_postal",
+          "pays_postal","commentaire_requisition","commentaire_page","commentaire_x",
+          "commentaire_y","date_prelevement","heure_prelevement","location_prelevement"),
+          names(source))
+        for(eid in etudiants) {
+          valeurs <- lapply(cols,function(cn) {
+            if(cn=="etudiant_id") return(eid)
+            if(cn=="statut") return("A_FAIRE")
+            source[[cn]][1]
+          })
+          sql <- paste0("INSERT INTO requisition_exercices(",
+            paste(cols,collapse=","),") VALUES (",
+            paste(rep("?",length(cols)),collapse=","),")")
+          db_execute(con,sql,params=valeurs)
+          newid <- db_query(con,"SELECT last_insert_rowid() AS id")$id[1]
+          anciens <- db_query(con,
+            "SELECT analyse_id,ordre_affichage FROM requisition_exercice_tests WHERE exercice_id=?",
+            params=list(id))
+          if(nrow(anciens)) for(k in seq_len(nrow(anciens)))
+            db_execute(con,
+              "INSERT INTO requisition_exercice_tests(exercice_id,analyse_id,ordre_affichage) VALUES (?,?,?)",
+              params=list(newid,anciens$analyse_id[k],anciens$ordre_affichage[k]))
+          manuels <- db_query(con,
+            "SELECT mnemonique,nom,ordre_affichage FROM requisition_exercice_tests_manuels WHERE exercice_id=?",
+            params=list(id))
+          if(nrow(manuels)) for(k in seq_len(nrow(manuels)))
+            db_execute(con,
+              "INSERT INTO requisition_exercice_tests_manuels(exercice_id,mnemonique,nom,ordre_affichage) VALUES (?,?,?,?)",
+              params=list(newid,manuels$mnemonique[k],manuels$nom[k],manuels$ordre_affichage[k]))
+          nb <- nb+1L
+        }
+        db_execute(con,"UPDATE requisition_exercices SET statut='ATTRIBUEE' WHERE id=? AND statut='EN_ATTENTE_ATTRIBUTION'",
+          params=list(id))
+      }
+      db_commit_retry(con); transaction_ouverte <- FALSE
+      refresh_exercices_requisition(refresh_exercices_requisition()+1L)
+      output$creation_req_message <- renderUI(div(class="success-box",
+        paste(nb,"réquisition(s) attribuée(s) à",length(etudiants),"étudiant(s).")))
+      showNotification(paste(nb,"attributions enregistrées."),type="message")
+    },error=function(e) {
+      if(transaction_ouverte) try(DBI::dbRollback(con),silent=TRUE)
+      showNotification(paste("Attribution impossible :",conditionMessage(e)),type="error",duration=15)
+      output$creation_req_message <- renderUI(div(class="danger-box",conditionMessage(e)))
+    })
+  })
+
   observeEvent(input$creation_req_attribuer,{
-    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    output$creation_req_message <- renderUI(div(class="info-box", "Vérification de la sélection et enregistrement en cours…"))
+    role_actuel <- tryCatch(toupper(as.character(utilisateur_connecte()$role)[1]), error=function(e) "")
+    if (is.na(role_actuel) || !role_actuel %in% c("ADMIN", "SUPERUTILISATEUR")) {
+      output$creation_req_message <- renderUI(div(class="danger-box", "Accès réservé aux administrateurs et superutilisateurs."))
+      showNotification("Droits insuffisants pour attribuer les réquisitions.", type="error")
+      return()
+    }
     try(restaurer_modeles_pdf_depuis_db(),silent=TRUE)
-    pid <- suppressWarnings(as.integer(input$creation_req_patient_id))
-    modele_id <- suppressWarnings(as.integer(input$creation_modele_id))
+    pids <- unique(suppressWarnings(as.integer(input$creation_req_patient_id %||% character(0))))
+    pids <- pids[!is.na(pids)]
+    modele_selection <- suppressWarnings(as.integer(input$creation_modele_id %||% NA_integer_))
+    modele_id <- if(length(modele_selection) && !is.na(modele_selection[1])) modele_selection[1] else NA_integer_
     eids <- unique(suppressWarnings(as.integer(input$creation_req_etudiant_id %||% character(0))))
     eids <- eids[!is.na(eids)]
     analyse_ids <- creation_req_selection()
     tests_manuels <- creation_req_tests_manuels()
 
-    if(is.na(pid) || length(eids)==0L) {
-      showNotification("Choisissez un patient et au moins un étudiant.",type="error"); return()
+    differe <- identical(input$creation_req_mode %||% "differe","differe")
+    if(length(pids)==0L || (!differe && length(eids)==0L)) {
+      showNotification("Sélectionnez des patients et, en attribution immédiate, des étudiants.",type="error"); return()
+    }
+    if(differe) eids <- as.integer(utilisateur_connecte()$id)
+    if(length(pids)*length(eids)>200L) {
+      showNotification("Maximum 200 réquisitions par opération. Réduisez la sélection.",type="error"); return()
     }
     if(is.na(modele_id)) {
       showNotification("Choisissez le modèle PDF de réquisition.",type="error"); return()
@@ -14335,8 +15183,8 @@ server <- function(input, output, session) {
     if(nrow(modele_ok)!=1) {
       showNotification("Le modèle PDF sélectionné n'est plus disponible.",type="error"); return()
     }
-    if(length(analyse_ids)==0) {
-      showNotification("Cochez au moins une analyse.",type="error"); return()
+    if(length(analyse_ids)==0L && nrow(tests_manuels)==0L) {
+      showNotification("Sélectionnez au moins une analyse du dictionnaire ou une analyse manuelle.",type="error"); return()
     }
 
     con <- ouvrir_db(); on.exit({
@@ -14347,6 +15195,7 @@ server <- function(input, output, session) {
       db_begin_retry(con)
       transaction_ouverte <- TRUE
       exids_crees <- integer(0)
+      for (pid in pids) {
       for (eid in eids) {
       db_execute(con,"
         INSERT INTO requisition_exercices(
@@ -14354,14 +15203,15 @@ server <- function(input, output, session) {
           adresse_postale,ville_postale,province_postale,code_postal,pays_postal,
           commentaire_requisition,commentaire_page,commentaire_x,commentaire_y,
           date_prelevement,heure_prelevement,location_prelevement)
-        VALUES (?,?,?,?, 'A_FAIRE',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        VALUES (?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params=list(
-          pid,eid,utilisateur_connecte()$id,norm_txt(input$creation_req_consigne),modele_id,
-          if(isTRUE(input$creation_req_utiliser_adresse)) norm_txt(input$creation_req_adresse) else NA_character_,
-          if(isTRUE(input$creation_req_utiliser_adresse)) norm_txt(input$creation_req_ville) else NA_character_,
-          if(isTRUE(input$creation_req_utiliser_adresse)) norm_txt(input$creation_req_province) else NA_character_,
-          if(isTRUE(input$creation_req_utiliser_adresse)) norm_upper(input$creation_req_code_postal) else NA_character_,
-          if(isTRUE(input$creation_req_utiliser_adresse)) norm_txt(input$creation_req_pays) else NA_character_,
+          pid,eid,utilisateur_connecte()$id,norm_txt(input$creation_req_consigne),
+          if(differe) "EN_ATTENTE_ATTRIBUTION" else "A_FAIRE",modele_id,
+          if(isTRUE(input$creation_req_utiliser_adresse) && length(pids)==1L) norm_txt(input$creation_req_adresse) else NA_character_,
+          if(isTRUE(input$creation_req_utiliser_adresse) && length(pids)==1L) norm_txt(input$creation_req_ville) else NA_character_,
+          if(isTRUE(input$creation_req_utiliser_adresse) && length(pids)==1L) norm_txt(input$creation_req_province) else NA_character_,
+          if(isTRUE(input$creation_req_utiliser_adresse) && length(pids)==1L) norm_upper(input$creation_req_code_postal) else NA_character_,
+          if(isTRUE(input$creation_req_utiliser_adresse) && length(pids)==1L) norm_txt(input$creation_req_pays) else NA_character_,
           norm_txt(input$creation_req_commentaire),
           1L,0.12,0.30,
           as.character(input$creation_req_date_prelevement %||% ""),
@@ -14369,6 +15219,7 @@ server <- function(input, output, session) {
           norm_txt(input$creation_req_location_prelevement)
         ))
       exid <- db_query(con,"SELECT last_insert_rowid() AS id")$id[1]
+      if(length(exid)!=1L || is.na(exid)) stop("Impossible de récupérer l’identifiant de la réquisition créée.")
 
       ordre <- 0L
       for(aid in analyse_ids) {
@@ -14395,7 +15246,8 @@ server <- function(input, output, session) {
       }
 
       exids_crees <- c(exids_crees,as.integer(exid))
-      } # une réquisition pédagogique indépendante par étudiant
+      } # chaque étudiant reçoit une réquisition indépendante pour ce patient
+      } # patient suivant
       db_commit_retry(con)
       transaction_ouverte <- FALSE
       # L'attribution est terminée ici. Aucun traitement PDF n'est exécuté
@@ -14414,10 +15266,11 @@ server <- function(input, output, session) {
       updateCheckboxGroupInput(session,"creation_req_tests_routine",selected=character(0))
       output$creation_req_message <- renderUI(
         div(class="success-box",
-            strong("Réquisition pédagogique créée et attribuée. "),
-            paste(length(exids_crees),"étudiant(s),",
+            strong(if(differe) "Réquisitions créées, en attente d'attribution. " else "Réquisitions créées et attribuées. "),
+            paste(length(pids),"patient(s),",length(eids),"étudiant(s),",
+                  length(exids_crees),"réquisition(s) individuelle(s),",
                   length(analyse_ids)+nrow(tests_manuels),
-                  "analyse(s) attendue(s) par étudiant."))
+                  "analyse(s) attendue(s) par réquisition."))
       )
     },error=function(e){
       if(isTRUE(transaction_ouverte) && !is.null(con) && DBI::dbIsValid(con))
@@ -14692,10 +15545,61 @@ server <- function(input, output, session) {
     )
   })
 
+  # Correctif PDF: lecture via Poppler si ImageMagick interdit le format PDF,
+  # et écriture avec le moteur PDF natif de R (aucun delegate ImageMagick PDF).
+  edusillab_lire_pages_pdf <- function(chemin, densite=150) {
+    if (!file.exists(chemin)) stop("Fichier PDF source introuvable : ", chemin)
+    if (!requireNamespace("magick", quietly=TRUE))
+      stop("Le package 'magick' est nécessaire pour annoter les réquisitions.")
+    essai <- tryCatch(magick::image_read_pdf(chemin,density=densite),error=function(e)e)
+    if (!inherits(essai,"error")) return(essai)
+    if (!requireNamespace("pdftools",quietly=TRUE))
+      stop("Lecture PDF impossible avec magick (",conditionMessage(essai),"). Installez 'pdftools'.")
+    repertoire <- tempfile("edusillab_pdf_pages_")
+    dir.create(repertoire,recursive=TRUE)
+    on.exit(unlink(repertoire,recursive=TRUE),add=TRUE)
+    fichiers <- pdftools::pdf_convert(chemin,format="png",dpi=densite,
+                                     filenames=file.path(repertoire,paste0("page_",seq_len(pdftools::pdf_info(chemin)$pages),".png")),verbose=FALSE)
+    magick::image_read(fichiers)
+  }
+
+  edusillab_ecrire_pages_pdf <- function(pages, fichier, densite=150) {
+    if (!length(pages)) stop("Aucune page à écrire dans le PDF.")
+    infos <- magick::image_info(pages)
+    largeur <- as.numeric(infos$width[1]); hauteur <- as.numeric(infos$height[1])
+    if (!is.finite(largeur) || !is.finite(hauteur) || largeur<=0 || hauteur<=0)
+      stop("Dimensions de page PDF invalides.")
+    # Rendu natif : évite la restriction de sécurité ImageMagick PDF.
+    grDevices::pdf(fichier,width=largeur/densite,height=hauteur/densite,
+                   paper="special",onefile=TRUE,useDingbats=FALSE)
+    on.exit(grDevices::dev.off(),add=TRUE)
+    for (i in seq_along(pages)) {
+      graphics::par(mar=c(0,0,0,0),xaxs="i",yaxs="i")
+      graphics::plot.new()
+      graphics::plot.window(xlim=c(0,1),ylim=c(0,1),asp=NA)
+      graphics::rasterImage(as.raster(pages[i]),0,0,1,1,interpolate=FALSE)
+    }
+    invisible(fichier)
+  }
+
+  nom_pdf_patient_requisition <- function(exid, prefixe="REQUISITION") {
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"SELECT p.nom,p.prenom FROM requisition_exercices re
+                       JOIN patients p ON p.id=re.patient_id WHERE re.id=?",
+                  params=list(exid))
+    if(!nrow(d)) return(paste0(prefixe,"_",exid,".pdf"))
+    nettoyer <- function(x) {
+      x <- iconv(as.character(x),to="ASCII//TRANSLIT",sub="")
+      x <- gsub("[^A-Za-z0-9_-]+","_",toupper(x))
+      gsub("^_+|_+$","",x)
+    }
+    paste0(prefixe,"_",nettoyer(d$nom[1]),"_",nettoyer(d$prenom[1]),"_",exid,".pdf")
+  }
+
   output$creation_req_pdf_download <- downloadHandler(
     filename=function() {
       exid <- derniere_creation_requisition()
-      paste0("REQUISITION_",exid,"_",format(Sys.Date(),"%Y%m%d"),".pdf")
+      nom_pdf_patient_requisition(exid)
     },
     contentType="application/pdf",
     content=function(file) {
@@ -14716,7 +15620,7 @@ server <- function(input, output, session) {
         stop("Le PDF original de cette réquisition est introuvable.")
 
       # Le PDF original est rendu page par page; aucune reconstruction du formulaire.
-      pages <- magick::image_read_pdf(d$fichier_pdf[1],density=180)
+      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=150)
       pos <- creation_req_pdf_positions()
       if(is.null(pos)) {
         z <- valeurs_requisition_pdf(exid)
@@ -14799,7 +15703,7 @@ server <- function(input, output, session) {
           location=paste0("+",xx,"+",yy),gravity="northwest")
       }
 
-      magick::image_write(pages,path=file,format="pdf")
+      edusillab_ecrire_pages_pdf(pages,file)
     }
   )
 
@@ -14827,7 +15731,7 @@ server <- function(input, output, session) {
 
   output$creation_pdf_analyses_ui <- renderUI({
     exid <- suppressWarnings(as.integer(input$creation_pdf_exercice_id))
-    if(is.na(exid)) return(NULL)
+    if(length(exid)!=1L || is.na(exid)) return(NULL)
 
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     a <- tryCatch(db_query(con,"
@@ -14886,7 +15790,7 @@ server <- function(input, output, session) {
     output$creation_pdf_erreur <- renderUI(NULL)
     try(restaurer_modeles_pdf_depuis_db(),silent=TRUE)
     exid <- suppressWarnings(as.integer(input$creation_pdf_exercice_id))
-    if(is.na(exid)) {
+    if(length(exid)!=1L || is.na(exid)) {
       pdf_exercice_selectionne(NULL)
       output$creation_pdf_erreur <- renderUI(
         div(class="danger-box","Sélectionnez une réquisition."))
@@ -15397,7 +16301,7 @@ setTimeout(async function(){
   output$creation_pdf_original_download <- downloadHandler(
     filename=function(){
       exid <- pdf_exercice_selectionne()
-      paste0("REQUISITION_ORIGINALE_",exid,".pdf")
+      nom_pdf_patient_requisition(exid, "REQUISITION_ORIGINALE")
     },
     contentType="application/pdf",
     content=function(file){
@@ -15416,10 +16320,147 @@ setTimeout(async function(){
     }
   )
 
+
+  # Réutilise le formulaire PDF original et les positions des X déjà configurées.
+  edusillab_exporter_requisition_formulaire <- function(exid,file) {
+      if(is.null(exid)) stop("Aucune réquisition sélectionnée.")
+      if(!requireNamespace("magick",quietly=TRUE))
+        stop("Le package magick n'est pas installé.")
+
+      con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+      d <- db_query(con,"
+        SELECT rm.fichier_pdf,p.nom,p.prenom,p.medicare,
+               p.numero_dossier,p.date_naissance,
+               re.adresse_postale,re.ville_postale,re.province_postale,
+               re.code_postal,re.pays_postal
+        FROM requisition_exercices re
+        JOIN patients p ON p.id=re.patient_id
+        JOIN requisition_modeles rm ON rm.id=re.modele_id
+        WHERE re.id=?",params=list(exid))
+      if(nrow(d)!=1 || !file.exists(d$fichier_pdf[1]))
+        stop("PDF original introuvable.")
+
+      if(is.na(d$fichier_pdf[1]) || !nzchar(d$fichier_pdf[1]))
+        stop("Aucun modèle PDF associé à cette réquisition. Attribuez un modèle Horizon/Vitalité.")
+      # IMPORTANT: le formulaire original reste le fond du document.
+      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=90)
+
+      # Renseignements du patient : appliqués à TOUS les modèles de réquisition.
+      modele_info <- db_query(con,"
+        SELECT re.modele_id,re.adresse_postale,re.ville_postale,
+               re.province_postale,re.code_postal,re.pays_postal,
+               p.nom,p.prenom,p.medicare,p.numero_dossier,
+               p.date_naissance,p.sexe,p.adresse,p.ville,p.province,
+               p.code_postal AS patient_code_postal,p.pays
+        FROM requisition_exercices re
+        JOIN patients p ON p.id=re.patient_id
+        WHERE re.id=?",params=list(exid))
+
+      champs <- db_query(con,"
+        SELECT champ,page,x,y,taille
+        FROM requisition_modele_champs
+        WHERE modele_id=?
+        ORDER BY id",params=list(modele_info$modele_id[1]))
+
+      propre <- function(x) {
+        if(length(x)==0 || is.na(x[1])) "" else trimws(as.character(x[1]))
+      }
+      valeur_champ <- function(champ) {
+        switch(champ,
+          NOM=propre(modele_info$nom),
+          PRENOM=propre(modele_info$prenom),
+          MEDICARE=propre(modele_info$medicare),
+          DATE_NAISSANCE=propre(modele_info$date_naissance),
+          SEXE=propre(modele_info$sexe),
+          DOSSIER=propre(modele_info$numero_dossier),
+          ADRESSE={
+            z <- propre(modele_info$adresse_postale)
+            if(!nzchar(z)) z <- propre(modele_info$adresse)
+            z
+          },
+          VILLE={
+            z <- propre(modele_info$ville_postale)
+            if(!nzchar(z)) z <- propre(modele_info$ville)
+            z
+          },
+          PROVINCE={
+            z <- propre(modele_info$province_postale)
+            if(!nzchar(z)) z <- propre(modele_info$province)
+            z
+          },
+          CODE_POSTAL={
+            z <- propre(modele_info$code_postal)
+            if(!nzchar(z)) z <- propre(modele_info$patient_code_postal)
+            z
+          },
+          PAYS={
+            z <- propre(modele_info$pays_postal)
+            if(!nzchar(z)) z <- propre(modele_info$pays)
+            z
+          },
+          ""
+        )
+      }
+
+      if(nrow(champs)>0) {
+        for(i in seq_len(nrow(champs))) {
+          pg <- suppressWarnings(as.integer(champs$page[i]))
+          if(is.na(pg) || pg<1 || pg>length(pages)) next
+          txt <- valeur_champ(as.character(champs$champ[i]))
+          if(!nzchar(txt)) next
+          inf <- magick::image_info(pages[pg])
+          xx <- round(as.numeric(champs$x[i])*inf$width[1])
+          yy <- round(as.numeric(champs$y[i])*inf$height[1])
+          pages[pg] <- magick::image_annotate(
+            pages[pg],txt,
+            size=as.integer(champs$taille[i]),
+            color="black",
+            location=paste0("+",xx,"+",yy),
+            gravity="northwest"
+          )
+        }
+      }
+
+
+      attendus <- db_query(con,"
+        SELECT a.mnemonique
+        FROM requisition_exercice_tests ret
+        JOIN analyses a ON a.id=ret.analyse_id
+        WHERE ret.exercice_id=?
+        ORDER BY ret.ordre_affichage",params=list(exid))
+
+      # Positions enregistrées par modèle. Si aucune position n'est définie,
+      # on conserve simplement le PDF original plutôt que de faire planter Shiny.
+      pos <- db_query(con,"
+        SELECT rmt.page,rmt.x,rmt.y,a.mnemonique
+        FROM requisition_modele_tests rmt
+        JOIN analyses a ON a.id=rmt.analyse_id
+        JOIN requisition_exercices re ON re.modele_id=rmt.modele_id
+        WHERE re.id=?",params=list(exid))
+
+      if(nrow(pos)>0 && nrow(attendus)>0){
+        pos <- pos[pos$mnemonique %in% attendus$mnemonique,,drop=FALSE]
+        for(i in seq_len(nrow(pos))){
+          pg <- as.integer(pos$page[i])
+          if(is.na(pg) || pg<1 || pg>length(pages)) next
+          inf <- magick::image_info(pages[pg])
+          xx <- round(as.numeric(pos$x[i])*inf$width[1])
+          yy <- round(as.numeric(pos$y[i])*inf$height[1])
+          pages[pg] <- magick::image_annotate(
+            pages[pg],"X",
+            size=max(5L,min(28L,11L)),
+            weight=700,color="black",
+            location=paste0("+",xx,"+",yy),gravity="northwest")
+        }
+      }
+
+      edusillab_ecrire_pages_pdf(pages,file,densite=90)
+  }
+
   output$creation_pdf_download <- downloadHandler(
     filename=function(){
       exid <- pdf_exercice_selectionne()
-      paste0("REQUISITION_",exid,"_",format(Sys.Date(),"%Y%m%d"),".pdf")
+      nom_pdf_patient_requisition(exid)
     },
     contentType="application/pdf",
     content=function(file){
@@ -15442,7 +16483,7 @@ setTimeout(async function(){
         stop("PDF original introuvable.")
 
       # IMPORTANT: le formulaire original reste le fond du document.
-      pages <- magick::image_read_pdf(d$fichier_pdf[1],density=150)
+      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=150)
 
       # Renseignements du patient : appliqués à TOUS les modèles de réquisition.
       modele_info <- db_query(con,"
@@ -15553,7 +16594,7 @@ setTimeout(async function(){
         }
       }
 
-      magick::image_write(pages,path=file,format="pdf")
+      edusillab_ecrire_pages_pdf(pages,file)
     }
   )
 
@@ -15687,7 +16728,7 @@ setTimeout(async function(){
       et_valides <- db_query(con,"SELECT id FROM utilisateurs WHERE actif=1 AND UPPER(role)='ETUDIANT'")$id
       if(any(!eids %in% et_valides)) stop("Un étudiant sélectionné n'est pas actif.")
       # Ne jamais écraser le travail d'un étudiant déjà inscrit à cet exercice.
-      colonnes <- intersect(c("patient_id","requisition_id","consigne","modele_id","adresse_postale","ville_postale","province_postale","code_postal","pays_postal","commentaire_requisition","commentaire_page","commentaire_x","commentaire_y","date_prelevement","heure_prelevement","location_prelevement"),names(src))
+      colonnes <- intersect(c("patient_id","requisition_id","consigne","modele_id","adresse_postale","ville_postale","province_postale","code_postal","pays_postal","commentaire_requisition","commentaire_page","commentaire_x","commentaire_y","date_prelevement","heure_prelevement","location_prelevement","medecin_prescripteur"),names(src))
       nouveaux <- integer()
       for(eid in eids) {
         # Les copies peuvent partager le patient : une attribution est unique
@@ -15746,11 +16787,205 @@ setTimeout(async function(){
                                 options=list(placeholder="Choisir plusieurs étudiants",plugins=list("remove_button")))),
         column(2,br(),actionButton("req_admin_attribuer","Attribuer",class="btn-primary"))
       ),
+      fluidRow(column(4,textInput("req_admin_medecin","DOC / Médecin prescripteur")),column(4,textInput("req_admin_location","Location / service")),column(4,textInput("req_admin_heure","Heure de prélèvement (HH:MM)"))),
       textAreaInput("req_admin_consigne","Consigne / note pour l'étudiant",rows=2,
                     placeholder="Ex. Entrer les analyses indiquées sur la requête remise en classe."),
+      tags$hr(),
+      h4("Téléchargement groupé des réquisitions"),
+      uiOutput("req_admin_zip_choix_ui"),
+      downloadButton("req_admin_zip_download","Télécharger la sélection en ZIP"),
+      tags$hr(),
+      h4("Modifier une réquisition déjà attribuée"),
+      helpText("Choisissez une attribution. Le patient et les analyses peuvent être modifiés uniquement si l'étudiant n'a pas commencé. La consigne reste modifiable ensuite."),
+      uiOutput("req_admin_modifier_choix_ui"),
+      actionButton("req_admin_modifier_ouvrir", "Modifier l'attribution", icon=icon("edit")),
       DT::DTOutput("req_admin_attributions_table")
     )
   })
+
+
+  # Modification contrôlée des réquisitions pédagogiques attribuées.
+  # Les saisies étudiantes déjà commencées ne sont jamais écrasées.
+  output$req_admin_modifier_choix_ui <- renderUI({
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    refresh_exercices_requisition()
+    cn <- ouvrir_db(); on.exit(DBI::dbDisconnect(cn), add=TRUE)
+    d <- db_query(cn, "
+      SELECT re.id, re.statut, u.nom, u.prenom, p.numero_dossier
+      FROM requisition_exercices re
+      JOIN utilisateurs u ON u.id=re.etudiant_id
+      JOIN patients p ON p.id=re.patient_id
+      WHERE re.statut <> 'EN_ATTENTE_ATTRIBUTION'
+      ORDER BY re.id DESC LIMIT 2500")
+    choix <- if(nrow(d)) setNames(as.character(d$id),
+      paste0("#",d$id," — ",d$prenom," ",d$nom," — dossier ",
+             ifelse(is.na(d$numero_dossier),"",d$numero_dossier),
+             " — ",d$statut)) else character()
+    selectizeInput("req_admin_modifier_id", "Attribution à modifier",
+                   choices=choix, options=list(placeholder="Rechercher un étudiant ou une attribution"))
+  })
+
+  observeEvent(input$req_admin_modifier_ouvrir, {
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    id <- suppressWarnings(as.integer(input$req_admin_modifier_id))
+    if(length(id)!=1L || is.na(id)) {
+      showNotification("Sélectionnez une attribution.",type="error"); return()
+    }
+    cn <- ouvrir_db(); on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d <- db_query(cn,"SELECT * FROM requisition_exercices WHERE id=?",params=list(id))
+    if(nrow(d)!=1L) {
+      showNotification("Attribution introuvable.",type="error");return()
+    }
+    modifiable <- identical(as.character(d$statut[1]),"A_FAIRE") &&
+      (is.na(d$date_ouverture[1]) || !nzchar(as.character(d$date_ouverture[1]))) &&
+      (is.na(d$date_completion[1]) || !nzchar(as.character(d$date_completion[1])))
+    pts <- db_query(cn,"SELECT id,nom,prenom,numero_dossier FROM patients WHERE actif=1 ORDER BY nom,prenom")
+    analyses <- db_query(cn,"SELECT id,mnemonique,nom FROM analyses ORDER BY mnemonique")
+    tests <- db_query(cn,"SELECT analyse_id FROM requisition_exercice_tests WHERE exercice_id=? ORDER BY ordre_affichage,id",params=list(id))
+    manuels <- db_query(cn,"SELECT mnemonique,nom FROM requisition_exercice_tests_manuels WHERE exercice_id=? ORDER BY ordre_affichage,id",params=list(id))
+    texte_manuels <- if(nrow(manuels)) paste(paste0(manuels$mnemonique," | ",ifelse(is.na(manuels$nom),"",manuels$nom)),collapse="\n") else ""
+    showModal(modalDialog(
+      title=paste("Modifier l'attribution #",id),
+      if(!modifiable) div(class="alert alert-warning",
+        "L'étudiant a commencé ou terminé : seule la consigne peut être modifiée. Ses saisies sont préservées."),
+      selectizeInput("req_admin_mod_patient","Patient",choices=setNames(as.character(pts$id),
+        paste0(pts$prenom," ",pts$nom," — ",ifelse(is.na(pts$numero_dossier),"",pts$numero_dossier))),
+        selected=as.character(d$patient_id[1]), options=list(placeholder="Choisir le patient")),
+      selectizeInput("req_admin_mod_tests","Analyses attendues",
+        choices=setNames(as.character(analyses$id),paste0(analyses$mnemonique," — ",analyses$nom)),
+        selected=as.character(tests$analyse_id),multiple=TRUE,
+        options=list(plugins=list("remove_button"))),
+      textAreaInput("req_admin_mod_manuels",
+        "Analyses spécifiques (une par ligne : MNEMO | Nom)",value=texte_manuels,rows=3),
+      fluidRow(column(4,textInput("req_admin_mod_medecin","DOC / Médecin",value=norm_txt(d$medecin_prescripteur[1]))),column(4,textInput("req_admin_mod_location","Location",value=norm_txt(d$location_prelevement[1]))),column(4,textInput("req_admin_mod_heure","Heure (HH:MM)",value=norm_txt(d$heure_prelevement[1])))),
+      textAreaInput("req_admin_mod_consigne","Consigne",value=ifelse(is.na(d$consigne[1]),"",as.character(d$consigne[1])),rows=3),
+      if(!modifiable) helpText("Les changements de patient et d'analyses seront ignorés pour protéger le travail de l'étudiant."),
+      footer=tagList(modalButton("Annuler"),
+        actionButton("req_admin_mod_enregistrer","Enregistrer les modifications",class="btn-primary")),
+      size="l",easyClose=FALSE
+    ))
+  })
+
+  observeEvent(input$req_admin_mod_enregistrer,{
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    id <- suppressWarnings(as.integer(input$req_admin_modifier_id))
+    if(length(id)!=1L || is.na(id)) return()
+    cn <- ouvrir_db(); on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    tx <- FALSE
+    tryCatch({
+      db_begin_retry(cn);tx <- TRUE
+      d <- db_query(cn,"SELECT * FROM requisition_exercices WHERE id=?",params=list(id))
+      if(nrow(d)!=1L) stop("Attribution introuvable.")
+      libre <- identical(as.character(d$statut[1]),"A_FAIRE") &&
+        (is.na(d$date_ouverture[1]) || !nzchar(as.character(d$date_ouverture[1]))) &&
+        (is.na(d$date_completion[1]) || !nzchar(as.character(d$date_completion[1])))
+      hh<-norm_txt(input$req_admin_mod_heure)
+      if(nzchar(hh)&&!grepl("^([01][0-9]|2[0-3]):[0-5][0-9]$",hh)) stop("Heure invalide : HH:MM attendu.")
+      db_execute(cn,"UPDATE requisition_exercices SET medecin_prescripteur=?,location_prelevement=?,heure_prelevement=? WHERE id=?",params=list(norm_txt(input$req_admin_mod_medecin),norm_txt(input$req_admin_mod_location),hh,id))
+      db_execute(cn,"UPDATE requisition_exercices SET consigne=? WHERE id=?",
+                 params=list(norm_txt(input$req_admin_mod_consigne),id))
+      if(libre) {
+        pid <- suppressWarnings(as.integer(input$req_admin_mod_patient))
+        if(length(pid)!=1L || is.na(pid)) stop("Sélectionnez un patient valide.")
+        if(!nrow(db_query(cn,"SELECT id FROM patients WHERE id=? AND actif=1",params=list(pid))))
+          stop("Patient introuvable ou inactif.")
+        ids <- unique(suppressWarnings(as.integer(input$req_admin_mod_tests %||% character())))
+        ids <- ids[!is.na(ids)]
+        if(length(ids)) {
+          ph <- paste(rep("?",length(ids)),collapse=",")
+          valides <- db_query(cn,paste0("SELECT id FROM analyses WHERE id IN (",ph,")"),params=as.list(ids))$id
+          if(any(!ids %in% valides)) stop("Une analyse sélectionnée n'existe pas.")
+        }
+        lignes <- trimws(strsplit(as.character(input$req_admin_mod_manuels %||% ""),"\n",fixed=TRUE)[[1]])
+        lignes <- lignes[nzchar(lignes)]
+        if(length(lignes)>100L) stop("Maximum 100 analyses spécifiques.")
+        morceaux <- strsplit(lignes,"|",fixed=TRUE)
+        mn <- toupper(trimws(vapply(morceaux,function(x)x[1],character(1))))
+        noms <- vapply(morceaux,function(x)if(length(x)>=2L)trimws(paste(x[-1],collapse="|")) else "",character(1))
+        if(any(!grepl("^[A-Z0-9._/-]{1,40}$",mn))) stop("Mnémonique spécifique invalide.")
+        if(anyDuplicated(mn)) stop("Mnémoniques spécifiques en double.")
+        db_execute(cn,"UPDATE requisition_exercices SET patient_id=? WHERE id=?",params=list(pid,id))
+        db_execute(cn,"DELETE FROM requisition_exercice_tests WHERE exercice_id=?",params=list(id))
+        db_execute(cn,"DELETE FROM requisition_exercice_tests_manuels WHERE exercice_id=?",params=list(id))
+        for(i in seq_along(ids))
+          db_execute(cn,"INSERT INTO requisition_exercice_tests(exercice_id,analyse_id,ordre_affichage) VALUES (?,?,?)",
+                     params=list(id,ids[i],i))
+        for(i in seq_along(mn))
+          db_execute(cn,"INSERT INTO requisition_exercice_tests_manuels(exercice_id,mnemonique,nom,ordre_affichage) VALUES (?,?,?,?)",
+                     params=list(id,mn[i],noms[i],i))
+      }
+      db_commit_retry(cn);tx <- FALSE
+      removeModal()
+      refresh_exercices_requisition(refresh_exercices_requisition()+1L)
+      showNotification(if(libre) "Réquisition attribuée modifiée." else "Consigne mise à jour; travail étudiant conservé.",
+                       type="message",duration=7)
+    },error=function(e){
+      if(tx) try(DBI::dbRollback(cn),silent=TRUE)
+      showNotification(paste("Modification impossible :",conditionMessage(e)),type="error",duration=12)
+    })
+  })
+
+
+  output$req_admin_zip_choix_ui <- renderUI({
+    req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+    refresh_exercices_requisition()
+    cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+    d<-db_query(cn,"SELECT re.id,u.nom AS en,u.prenom AS ep,p.nom AS pn,p.prenom AS pp FROM requisition_exercices re JOIN utilisateurs u ON u.id=re.etudiant_id JOIN patients p ON p.id=re.patient_id ORDER BY re.id DESC LIMIT 3000")
+    selectizeInput("req_admin_zip_ids","Sélectionner les réquisitions",choices=setNames(as.character(d$id),paste0("#",d$id," — ",d$ep," ",d$en," — Patient : ",d$pp," ",d$pn)),multiple=TRUE,options=list(plugins=list("remove_button")))
+  })
+
+  # Export PDF nominatif autonome, distinct du modèle Horizon/Vitalité.
+  edusillab_pdf_lot <- function(cn,id,path) {
+    d<-db_query(cn,"SELECT re.*,p.nom AS pn,p.prenom AS pp,p.numero_dossier,p.medicare,p.date_naissance,u.nom AS en,u.prenom AS ep FROM requisition_exercices re JOIN patients p ON p.id=re.patient_id JOIN utilisateurs u ON u.id=re.etudiant_id WHERE re.id=?",params=list(id))
+    if(nrow(d)!=1L) stop("Réquisition introuvable")
+    a<-db_query(cn,"SELECT a.mnemonique,a.nom FROM requisition_exercice_tests t JOIN analyses a ON a.id=t.analyse_id WHERE t.exercice_id=? ORDER BY t.ordre_affichage,t.id",params=list(id))
+    m<-db_query(cn,"SELECT mnemonique,nom FROM requisition_exercice_tests_manuels WHERE exercice_id=? ORDER BY ordre_affichage,id",params=list(id))
+    v<-function(x) {z<-as.character(x[1]);if(!length(z)||is.na(z)) "" else z}
+    et<-paste(v(d$ep),v(d$en));pat<-paste(v(d$pp),v(d$pn))
+    lignes<-c(paste("ETUDIANT :",et),paste("PATIENT :",pat),paste("DOSSIER :",v(d$numero_dossier)),paste("MEDICARE :",v(d$medicare)),paste("NAISSANCE :",v(d$date_naissance)),paste("DOC / MEDECIN :",v(d$medecin_prescripteur)),paste("LOCATION :",v(d$location_prelevement)),paste("HEURE PRELEVEMENT :",v(d$heure_prelevement)),paste("STATUT :",v(d$statut))," ","ANALYSES DEMANDEES :")
+    if(nrow(a)) lignes<-c(lignes,paste0(" - ",a$mnemonique," : ",a$nom))
+    if(nrow(m)) lignes<-c(lignes,paste0(" - ",m$mnemonique," : ",m$nom))
+    if(!nrow(a)&&!nrow(m)) lignes<-c(lignes," - Aucune analyse")
+    lignes<-c(lignes," ","CONSIGNE :",v(d$consigne))
+    lignes<-unlist(lapply(lignes,function(x)strwrap(iconv(x,to="ASCII//TRANSLIT",sub=""),width=85)),use.names=FALSE)
+    grDevices::pdf(path,width=8.27,height=11.69,paper="special",onefile=TRUE);on.exit(grDevices::dev.off(),add=TRUE)
+    blocs<-split(seq_along(lignes),ceiling(seq_along(lignes)/44))
+    for(k in seq_along(blocs)) {
+      graphics::par(mar=c(0,0,0,0));graphics::plot.new();graphics::plot.window(xlim=c(0,1),ylim=c(0,1))
+      graphics::text(.06,.965,paste("EDUSILLAB — REQUISITION",id),adj=0,font=2,cex=1.25)
+      graphics::text(.06,.93,paste("ETUDIANT :",et," | PATIENT :",pat),adj=0,font=2,cex=.75)
+      graphics::segments(.06,.912,.94,.912)
+      for(j in seq_along(blocs[[k]])) graphics::text(.07,.885-(j-1)*.019,lignes[blocs[[k]][j]],adj=0,cex=.72)
+      graphics::text(.94,.025,paste("Page",k,"/",length(blocs)),adj=1,cex=.65)
+    }
+  }
+  output$req_admin_zip_download <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_REQUISITIONS_",format(Sys.Date(),"%Y%m%d"),".zip"),
+    contentType="application/zip",
+    content=function(file) {
+      req(toupper(utilisateur_connecte()$role %||% "") %in% c("ADMIN","SUPERUTILISATEUR"))
+      ids<-unique(suppressWarnings(as.integer(input$req_admin_zip_ids %||% character())))
+      ids<-ids[!is.na(ids)]
+      if(!length(ids)||length(ids)>30L) stop("Sélectionnez entre 1 et 30 réquisitions.")
+      cn<-ouvrir_db();on.exit(DBI::dbDisconnect(cn),add=TRUE)
+      td<-tempfile("req_lot_");dir.create(td);on.exit(unlink(td,recursive=TRUE),add=TRUE)
+      safe<-function(x) gsub("[^A-Za-z0-9_-]","_",iconv(as.character(x),to="ASCII//TRANSLIT",sub=""))
+      noms<-character()
+      for(id in ids) {
+        d<-db_query(cn,"SELECT u.nom AS en,u.prenom AS ep,p.nom AS pn,p.prenom AS pp FROM requisition_exercices re JOIN utilisateurs u ON u.id=re.etudiant_id JOIN patients p ON p.id=re.patient_id WHERE re.id=?",params=list(id))
+        if(nrow(d)!=1L) stop(paste("Attribution introuvable",id))
+        nom<-paste0(safe(d$en[1]),"_",safe(d$ep[1]),"__",safe(d$pn[1]),"_",safe(d$pp[1]),"_REQ_",id,".pdf")
+        tryCatch(
+          edusillab_exporter_requisition_formulaire(id,file.path(td,nom)),
+          error=function(e) stop(sprintf("Réquisition #%s : %s",id,conditionMessage(e)))
+        )
+        gc(verbose=FALSE);noms<-c(noms,nom)
+      }
+      if(!requireNamespace("zip",quietly=TRUE)) stop("Installez le package R zip : install.packages('zip').")
+      zip::zipr(zipfile=normalizePath(file,mustWork=FALSE),files=noms,root=td,include_directories=FALSE)
+      if(!file.exists(file)||file.info(file)$size==0) stop("ZIP non généré : installez le package zip.")
+    }
+  )
 
   output$req_admin_attributions_table <- DT::renderDT({
     req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
@@ -15780,6 +17015,8 @@ setTimeout(async function(){
     if(is.na(pid) || !length(eids)) {
       showNotification("Choisissez un patient et au moins un étudiant.",type="error"); return()
     }
+    hh<-norm_txt(input$req_admin_heure)
+    if(nzchar(hh)&&!grepl("^([01][0-9]|2[0-3]):[0-5][0-9]$",hh)) {showNotification("Heure invalide (HH:MM).",type="error");return()}
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
     transaction_ouverte <- FALSE
     tryCatch({
@@ -15787,9 +17024,9 @@ setTimeout(async function(){
       transaction_ouverte <- TRUE
       for (eid in eids) {
         db_execute(con,"
-          INSERT INTO requisition_exercices(patient_id,etudiant_id,attribue_par,consigne,statut)
-          VALUES (?,?,?,?, 'A_FAIRE')",
-          params=list(pid,eid,utilisateur_connecte()$id,norm_txt(input$req_admin_consigne)))
+          INSERT INTO requisition_exercices(patient_id,etudiant_id,attribue_par,consigne,medecin_prescripteur,location_prelevement,heure_prelevement,statut)
+          VALUES (?,?,?,?,?,?,?, 'A_FAIRE')",
+          params=list(pid,eid,utilisateur_connecte()$id,norm_txt(input$req_admin_consigne),norm_txt(input$req_admin_medecin),norm_txt(input$req_admin_location),norm_txt(input$req_admin_heure)))
       }
       db_commit_retry(con)
       transaction_ouverte <- FALSE
@@ -16655,7 +17892,7 @@ setTimeout(async function(){
           "COALESCE(ra.source_autre,'') AS source_autre ",
           "FROM requisition_analyses ra ",
           "JOIN analyses a ON a.id=ra.analyse_id ",
-          "LEFT JOIN departements_px dp ON UPPER(dp.departement)=UPPER(a.departement) ",
+          "LEFT JOIN departements_px dp ON UPPER(TRIM(dp.departement))=UPPER(TRIM(a.departement)) ",
           "WHERE ra.requisition_id=? ",
           "ORDER BY a.departement,a.mnemonique"
         ),
@@ -16673,110 +17910,132 @@ setTimeout(async function(){
         ifelse(nzchar(source_effective), source_effective, "SANS SOURCE"),
         sep="|||"
       )
+      # EDUSILLAB : répartition des analyses entre les tubes physiques.
+      # Les tubes sont groupés uniquement si leur désignation est équivalente.
+      # Ne pas fusionner des tubes de natures différentes sur une même étiquette.
+      normaliser_tube_etiquette <- function(x) {
+        z <- toupper(trimws(as.character(x)))
+        z[is.na(z)] <- ""
+        z <- gsub("[[:space:]]+", " ", z)
+        z <- gsub("LIME\\s*/?\\s*J\\s*OR", "LIME/J OR", z, perl=TRUE)
+        z <- gsub("JAUNE\\s+D.OR", "JAUNE OR", z, perl=TRUE)
+        z
+      }
+      tubes_normalises <- normaliser_tube_etiquette(infos_tests$tube_prelevement)
+      # Regrouper par PX (pas par libelle de departement) : les analyses
+      # de chimie peuvent avoir des departements descriptifs differents.
+      # Les tubes incompatibles restent separes.
+      px_groupes <- toupper(trimws(as.character(infos_tests$px)))
+      px_groupes[is.na(px_groupes) | !nzchar(px_groupes)] <- "SANS PX"
+      cle_groupes <- paste(
+        px_groupes,
+        ifelse(nzchar(source_effective), source_effective, "SANS SOURCE"),
+        ifelse(nzchar(tubes_normalises), tubes_normalises, "SANS TUBE"),
+        sep="|||"
+      )
       groupes <- split(infos_tests, cle_groupes)
       labels_crees <- list()
       compteur_label <- 0L
+      analyses_attribuees <- integer()
 
       for (cle_groupe in names(groupes)) {
         gd <- groupes[[cle_groupe]]
+        if (!nrow(gd)) next
         dep <- if (nzchar(gd$departement[1])) gd$departement[1] else "SANS DEPARTEMENT"
-
         nb <- suppressWarnings(as.numeric(gd$nb_tubes))
-        nb_valides <- nb[!is.na(nb) & nb > 0]
-
-        nombre_etiquettes <- if (length(nb_valides) == 0) {
-          1L
-        } else {
-          as.integer(ceiling(max(nb_valides)))
-        }
-
-        quantite <- as.character(nombre_etiquettes)
-
+        nb_valides <- nb[is.finite(nb) & nb > 0]
+        nombre_tubes <- if(length(nb_valides)) as.integer(ceiling(max(nb_valides))) else 1L
+        # Une étiquette ne doit jamais contenir plus de neuf analyses.
+        nombre_tubes <- max(nombre_tubes, as.integer(ceiling(nrow(gd)/9L)))
+        if(nombre_tubes > 100L) stop("Nombre de tubes anormalement élevé : vérifier la configuration des analyses.")
         px_nonvide <- gd$px[nzchar(gd$px)]
-        px_label <- if (length(px_nonvide)) px_nonvide[1] else "X"
-
-        tubes <- unique(norm_txt(gd$tube_prelevement))
-        tubes <- tubes[nzchar(tubes)]
-        contenant <- if (length(tubes)) paste(tubes, collapse=" / ") else "NON PRECISE"
-
+        px_label <- if(length(px_nonvide)) px_nonvide[1] else "X"
+        contenant <- normaliser_tube_etiquette(gd$tube_prelevement[1])
+        if(!nzchar(contenant)) contenant <- "NON PRECISE"
         source_effective_gd <- ifelse(
           toupper(norm_txt(gd$source_prelevement))=="AUTRE",
-          norm_txt(gd$source_autre),
-          norm_txt(gd$source_prelevement)
+          norm_txt(gd$source_autre), norm_txt(gd$source_prelevement)
         )
         source_effective_gd <- unique(source_effective_gd[nzchar(source_effective_gd)])
-        source_label <- if (length(source_effective_gd)) source_effective_gd[1] else ""
-
-        analyses_label <- paste(
-          unique(
-            ifelse(
-              nzchar(source_label),
-              paste0(gd$mnemonique, " [", source_label, "]"),
-              gd$mnemonique
-            )
-          ),
-          collapse=", "
-        )
-
+        source_label <- if(length(source_effective_gd)) source_effective_gd[1] else ""
         location_label <- norm_txt(input$req_location)
-        if (!nzchar(location_label)) location_label <- "NON PRECISEE"
-
-        # V25 :
-        # Un seul spécimen logique est créé pour ce groupe.
-        # Si 2 ou 3 étiquettes sont nécessaires, elles sont des copies du même
-        # spécimen et utilisent donc le même BC# et le même numéro de spécimen.
-        code_barre <- generer_code_barre(con)
-        numero_specimen <- generer_numero_specimen(
-          con,
-          as.character(input$req_coll_date),
-          px_label,
-          input$req_priorite
-        )
-
-        compteur_label <- compteur_label + 1L
-
-        db_execute(con, "
-          INSERT INTO specimens
-          (requisition_id,patient_id,numero_specimen,code_barre,date_specimen,
-           departement,px,priorite,location,analyses,quantite,contenant,
-           groupe_etiquette,cree_par,saisi_initiales,saisi_matricule,source_prelevement)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        ", params=list(
-          requisition_id,patient_id,numero_specimen,code_barre,as.character(input$req_coll_date),
-          dep,px_label,input$req_priorite,location_label,analyses_label,quantite,contenant,
-          compteur_label,utilisateur_connecte()$id,
-          utilisateur_connecte()$initiales,utilisateur_connecte()$matricule,
-          source_label
-        ))
-
-        # Plusieurs copies physiques, toutes avec le MÊME BC#.
-        for (copie_etiquette in seq_len(nombre_etiquettes)) {
+        if(!nzchar(location_label)) location_label <- "NON PRECISEE"
+        # Répartition déterministe, chaque analyse une fois et un maximum de 9 par tube.
+        # Le même ordre est conservé en base et en réimpression.
+        # Remplir chaque tube successivement (9 analyses maximum), sans duplication.
+        # Si nb_tubes impose davantage de tubes, les tubes supplementaires restent distincts.
+        paquets <- split(seq_len(nrow(gd)), pmin(nombre_tubes, ceiling(seq_len(nrow(gd))/9L)))
+        for(tube_i in seq_len(nombre_tubes)) {
+          indices <- paquets[[as.character(tube_i)]]
+          gt <- if(length(indices)) gd[indices,,drop=FALSE] else gd[FALSE,,drop=FALSE]
+          if(nrow(gt)>9L) stop("Répartition impossible : plus de 9 analyses sur un tube.")
+          analyses_attribuees <- c(analyses_attribuees,as.integer(gt$id))
+          analyses_label <- if(nrow(gt)) paste(unique(ifelse(
+            nzchar(source_label), paste0(gt$mnemonique," [",source_label,"]"),
+            gt$mnemonique)),collapse=", ") else "AUCUNE ANALYSE ATTRIBUEE"
+          code_barre <- generer_code_barre(con)
+          numero_specimen <- generer_numero_specimen(
+            con,as.character(input$req_coll_date),px_label,input$req_priorite)
+          compteur_label <- compteur_label + 1L
+          # Un spécimen distinct et un BC# distinct par tube physique.
+          db_execute(con, "
+            INSERT INTO specimens
+            (requisition_id,patient_id,numero_specimen,code_barre,date_specimen,
+             departement,px,priorite,location,analyses,quantite,contenant,
+             groupe_etiquette,cree_par,saisi_initiales,saisi_matricule,source_prelevement)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+          ",params=list(
+            requisition_id,patient_id,numero_specimen,code_barre,as.character(input$req_coll_date),
+            dep,px_label,input$req_priorite,location_label,analyses_label,"1",contenant,
+            compteur_label,utilisateur_connecte()$id,
+            utilisateur_connecte()$initiales,utilisateur_connecte()$matricule,source_label
+          ))
+          # Relier chaque analyse au specimen par son identifiant reel.
+          specimen_nouveau_id <- db_query(con,
+            "SELECT id FROM specimens WHERE requisition_id=? AND code_barre=? LIMIT 1",
+            params=list(requisition_id,code_barre))$id[1]
+          if(length(specimen_nouveau_id)!=1L || is.na(specimen_nouveau_id)) stop("Specimen non retrouve apres insertion")
+          if(nrow(gt)) for(analyse_id_spec in as.integer(gt$id)) {
+            db_execute(con,"INSERT INTO specimen_analyses (specimen_id,analyse_id,requisition_id) VALUES (?,?,?)",
+              params=list(specimen_nouveau_id,analyse_id_spec,requisition_id))
+          }
           labels_crees[[length(labels_crees)+1L]] <- data.frame(
             numero_requisition=numero_requisition,
-            numero_specimen=numero_specimen,
-            code_barre=code_barre,
-            nom=norm_upper(patient_label$nom[1]),
-            prenom=norm_upper(patient_label$prenom[1]),
+            numero_specimen=numero_specimen,code_barre=code_barre,
+            nom=norm_upper(patient_label$nom[1]),prenom=norm_upper(patient_label$prenom[1]),
             numero_dossier=identifiant_patient_affichage(patient_label$numero_dossier[1]),
             medicare=identifiant_patient_affichage(patient_label$medicare[1]),
-            sexe=norm_txt(patient_label$sexe[1]),
-            location=location_label,
-            analyses=analyses_label,
-            quantite=quantite,
-            contenant=contenant,
-            departement=dep,
-            px=px_label,
-            saisi_nom_complet=trimws(paste(norm_txt(utilisateur_connecte()$prenom), norm_txt(utilisateur_connecte()$nom))),
-            date_saisie=format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+            sexe=norm_txt(patient_label$sexe[1]),location=location_label,
+            analyses=analyses_label,quantite="1",contenant=contenant,
+            departement=dep,px=px_label,
+            saisi_nom_complet=trimws(paste(norm_txt(utilisateur_connecte()$prenom),norm_txt(utilisateur_connecte()$nom))),
+            date_saisie=format(Sys.time(),"%Y-%m-%d %H:%M:%S"),
             signature_initiales=norm_txt(utilisateur_connecte()$initiales),
             stringsAsFactors=FALSE
           )
         }
       }
-
-      # Aligner l'aperçu initial sur les données persistées, comme la réimpression.
-      # Évite que des analyses de chimie apparaissent seulement lors de la réimpression.
-      synchroniser_chimie_requisition(con, requisition_id)
+      # Verification transactionnelle: chaque analyse de la requisition doit
+      # etre affectee exactement une fois a un specimen nouvellement cree.
+      # Cette verification porte sur les identifiants et non sur l'affichage PDF.
+      # Empêcher toute validation silencieuse avec analyses oubliées ou dupliquées.
+      ids_attendus <- sort(as.integer(infos_tests$id))
+      ids_obtenus <- sort(as.integer(analyses_attribuees))
+      if(!identical(ids_attendus,ids_obtenus)) {
+        stop("Répartition des analyses incomplète : aucune réquisition n'a été validée. Vérifier les tubes et les tests.")
+      }
+      if(!length(labels_crees)) stop("Aucune étiquette créée pour cette réquisition.")
+      # Controle transactionnel fiable par identifiants : ne depend pas de
+      # l'affichage, de la source ou de la ponctuation des mnemotechniques.
+      assoc_controle <- db_query(con,
+        "SELECT analyse_id,COUNT(*) AS n FROM specimen_analyses WHERE requisition_id=? GROUP BY analyse_id",
+        params=list(requisition_id))
+      ids_assoc <- sort(as.integer(assoc_controle$analyse_id))
+      if(!identical(sort(unique(ids_attendus)),ids_assoc) || any(assoc_controle$n!=1L)) {
+        stop("Analyses absentes ou dupliquees dans les specimens (verification par identifiants). Requisition non enregistree.")
+      }
+      # Les analyses ont été écrites directement dans chaque spécimen, sans
+      # synchronisation heuristique qui pourrait déplacer ou masquer la chimie.
       for (ii in seq_along(labels_crees)) {
         bc <- as.character(labels_crees[[ii]]$code_barre[1])
         spec_maj <- db_query(con,
@@ -16784,7 +18043,7 @@ setTimeout(async function(){
           params=list(requisition_id,bc))
         if (nrow(spec_maj)==1L) labels_crees[[ii]]$analyses <- as.character(spec_maj$analyses[1])
       }
-      dernieres_etiquettes(do.call(rbind,labels_crees))
+      dernieres_etiquettes(edusillab_completer_analyses_etiquettes(do.call(rbind,labels_crees),con))
 
       db_commit_retry(con)
 
@@ -16839,7 +18098,7 @@ setTimeout(async function(){
           conp <- ouvrir_db()
           on.exit(try(DBI::dbDisconnect(conp), silent=TRUE), add=TRUE)
 
-          nom_pdf <- paste0("apercu_etiquettes_REQ_",numero_requisition,".pdf")
+          nom_pdf <- nom_pdf_saisie_etiquettes()
           chemin_pdf <- file.path(preview_dir,nom_pdf)
 
           creer_pdf_partage_ou_individuel(
@@ -16958,29 +18217,6 @@ setTimeout(async function(){
         column(3,selectInput("planche_papier","Papier",c("Letter (215,9 × 279,4 mm)"="letter","A4 (210 × 297 mm)"="a4"))),
         column(3,selectInput("planche_orientation","Orientation",c("Portrait"="portrait","Paysage"="paysage")))
       ),
-      ),
-      tags$div(style="padding:14px;border:2px solid #0b7b83;border-radius:8px;background:#f3fbfb;margin:12px 0;",
-        h4("CONTENU DES ÉTIQUETTES ET CODES-BARRES — réglages visibles"),
-        actionButton("planche_contenu_save","Sauvegarder le contenu des étiquettes",class="btn-success"),
-        actionButton("planche_contenu_recharger","Recharger le contenu sauvegardé"),
-        textOutput("planche_contenu_statut"),
-        p("Ces réglages agissent sur le contenu de chaque étiquette, pas sur les dimensions physiques de la planche."),
-      hr(),h4("Codes-barres : disposition manuelle"),
-      p("Chaque code-barres conserve sa valeur propre. Le second peut représenter le numéro de réquisition ou le numéro de spécimen; il ne crée pas un nouveau spécimen."),
-      fluidRow(
-        column(3,selectInput("planche_bc1_valeur","Code-barres 1",c("Code du spécimen"="code_barre","Numéro de réquisition"="numero_requisition","Numéro de spécimen"="numero_specimen"))),
-        column(3,numericInput("planche_bc1_x","Code 1 : X (%)",3,min=0,max=95,step=1)),
-        column(3,numericInput("planche_bc1_y","Code 1 : Y (%)",77,min=0,max=95,step=1)),
-        column(3,numericInput("planche_bc1_w","Code 1 : largeur (%)",60,min=10,max=100,step=1)),
-        column(3,numericInput("planche_bc1_h","Code 1 : hauteur (%)",13,min=3,max=35,step=1)),
-        column(3,checkboxInput("planche_bc2_actif","Afficher un deuxième code-barres",FALSE)),
-        column(3,selectInput("planche_bc2_valeur","Code-barres 2",c("Numéro de réquisition"="numero_requisition","Numéro de spécimen"="numero_specimen","Code du spécimen"="code_barre"))),
-        column(3,numericInput("planche_bc2_x","Code 2 : X (%)",3,min=0,max=95,step=1)),
-        column(3,numericInput("planche_bc2_y","Code 2 : Y (%)",55,min=0,max=95,step=1)),
-        column(3,numericInput("planche_bc2_w","Code 2 : largeur (%)",94,min=10,max=100,step=1)),
-        column(3,numericInput("planche_bc2_h","Code 2 : hauteur (%)",13,min=3,max=35,step=1))
-      ),
-      p(class="text-muted","Ajustez X/Y, largeur et hauteur pour agrandir, réduire ou déplacer chaque code indépendamment. Les deux codes sont en Code 39 numérique; vérifiez leur lisibilité avec votre lecteur. PX H et PX HC restent des spécimens distincts et ne sont pas fusionnés.")
       ),
       uiOutput("planche_controle_geometrie"),
       uiOutput("planche_apercu_grille"),
@@ -17142,10 +18378,12 @@ setTimeout(async function(){
       planche_left=input$mat_marge_gauche,planche_top=input$mat_marge_haut,
       planche_gap_x=as.numeric(input$mat_pas_x)-as.numeric(input$mat_largeur),
       planche_gap_y=as.numeric(input$mat_pas_y)-as.numeric(input$mat_hauteur))
-    if(any(!is.finite(unlist(vals))) || vals$planche_gap_x<0 || vals$planche_gap_y<0) {
+    if(any(!is.finite(unlist(vals)))) {
       showNotification("Dimensions incohérentes : le pas doit être supérieur ou égal à la taille de l'étiquette.",type="error")
       return()
     }
+    vals$planche_gap_x <- max(0,vals$planche_gap_x)
+    vals$planche_gap_y <- max(0,vals$planche_gap_y)
     for(k in names(vals)) updateNumericInput(session,k,value=vals[[k]])
     updateSelectInput(session,"planche_orientation",
       selected=if(identical(input$mat_orientation,"PAYSAGE")) "paysage" else "portrait")
@@ -17261,10 +18499,10 @@ setTimeout(async function(){
     py<-suppressWarnings(as.numeric(input$mat_pas_y))
     if(any(!is.finite(c(lw,lh,px,py)))) return(NULL)
     if(px<lw || py<lh)
-      div(class="alert alert-danger",
-        strong("Attention : les étiquettes se chevauchent ! "),
-        sprintf("Pas horizontal %.2f mm (minimum %.2f mm) ; pas vertical %.2f mm (minimum %.2f mm).",px,lw,py,lh),
-        " Pour ta planche Letter 3 × 10 : 69,85 mm horizontal et 25,4 mm vertical.")
+      div(class="alert alert-warning",
+        strong("Vérification manuelle : "),
+        sprintf("Pas horizontal %.2f mm, largeur %.2f mm ; pas vertical %.2f mm, hauteur %.2f mm.",px,lw,py,lh),
+        " Ces paramètres sont libres. Vérifiez le résultat dans l'aperçu avant impression.")
     else
       div(class="alert alert-success","Aucun chevauchement géométrique entre les étiquettes.")
   })
@@ -17353,10 +18591,26 @@ setTimeout(async function(){
     content=function(file){p<-planche_pdf_controle();req(!is.null(p),file.exists(p));file.copy(p,file,overwrite=TRUE)},
     contentType="application/pdf")
 
+  output$req_pdf_etiquettes_disponible <- renderUI({
+    p <- dernier_pdf_etiquettes()
+    if(is.null(p) || !file.exists(p)) return(NULL)
+    div(class="alert alert-success",
+      strong("PDF des étiquettes généré."),
+      p("Téléchargez le document avant de quitter la réquisition."),
+      downloadButton("req_telecharger_pdf_etiquettes","Télécharger les étiquettes (PDF)",class="btn-primary"))
+  })
+  output$req_telecharger_pdf_etiquettes <- downloadHandler(
+    filename=function() nom_pdf_saisie_etiquettes(),
+    content=function(file) {
+      p<-dernier_pdf_etiquettes()
+      req(!is.null(p),file.exists(p))
+      if(!file.copy(p,file,overwrite=TRUE)) stop("Impossible de copier le PDF des étiquettes")
+    },contentType="application/pdf")
+
   output$telecharger_pdf_etiquettes <- downloadHandler(
     filename=function() {
       p <- dernier_pdf_etiquettes()
-      if (is.null(p)) "apercu_etiquettes.pdf" else basename(p)
+      nom_pdf_saisie_etiquettes()
     },
     content=function(file) {
       p <- dernier_pdf_etiquettes()
@@ -17387,7 +18641,7 @@ setTimeout(async function(){
   output$telecharger_pdf_etiquettes_modal <- downloadHandler(
     filename=function() {
       p <- dernier_pdf_etiquettes()
-      if (is.null(p)) "apercu_etiquettes.pdf" else basename(p)
+      nom_pdf_saisie_etiquettes()
     },
     content=function(file) {
       p <- dernier_pdf_etiquettes()
@@ -18825,6 +20079,7 @@ setTimeout(async function(){
       j <- candidates[1]
       vals <- trimws(unlist(strsplit(as.character(specs$analyses[j]),',',fixed=TRUE)))
       vals <- unique(c(vals[nzchar(vals)],code))
+      if (length(vals) > 9L) next
       nv <- paste(vals,collapse=', ')
       db_execute(con,'UPDATE specimens SET analyses=? WHERE id=?',params=list(nv,specs$id[j]))
       specs$analyses[j] <- nv
@@ -18881,7 +20136,7 @@ setTimeout(async function(){
       nouveaux <- setdiff(ids,as.integer(deja$analyse_id))
       for(aid in nouveaux) {
         a <- db_query(con,
-          "SELECT a.id,a.mnemonique,a.nom,COALESCE(a.departement,'') AS departement,COALESCE(dp.px,'') AS px,COALESCE(a.tube_prelevement,'') AS tube_prelevement FROM analyses a LEFT JOIN departements_px dp ON UPPER(dp.departement)=UPPER(a.departement) WHERE a.id=? AND a.actif=1",
+          "SELECT a.id,a.mnemonique,a.nom,COALESCE(a.departement,'') AS departement,COALESCE(dp.px,'') AS px,COALESCE(a.tube_prelevement,'') AS tube_prelevement FROM analyses a LEFT JOIN departements_px dp ON UPPER(TRIM(dp.departement))=UPPER(TRIM(a.departement)) WHERE a.id=? AND a.actif=1",
           params=list(aid))
         if(nrow(a)!=1L) stop(paste("Analyse inactive ou introuvable :",aid))
         db_execute(con,"INSERT INTO requisition_analyses (requisition_id,analyse_id,source_prelevement,source_autre) VALUES (?,?,'','')",
@@ -18918,6 +20173,8 @@ setTimeout(async function(){
           old <- norm_txt(spec$analyses[cible])
           val <- paste(c(old[nzchar(old)],norm_txt(a$mnemonique[1])),collapse=", ")
           db_execute(con,"UPDATE specimens SET analyses=? WHERE id=?",params=list(val,spec$id[cible]))
+          db_execute(con,"INSERT INTO specimen_analyses (specimen_id,analyse_id,requisition_id) VALUES (?,?,?) ON CONFLICT DO NOTHING",
+            params=list(spec$id[cible],aid,rid))
         } else {
           # Nouveau spécimen et BC# distinct : l'existant n'est pas modifié.
           code <- generer_code_barre(con)
@@ -18933,6 +20190,10 @@ setTimeout(async function(){
                         if(nzchar(a$tube_prelevement[1])) a$tube_prelevement[1] else "NON PRECISE",
                         if(nrow(spec) && any(!is.na(spec$groupe_etiquette))) max(as.integer(spec$groupe_etiquette),na.rm=TRUE)+1L else 1L,
                         utilisateur_connecte()$id,utilisateur_connecte()$initiales,utilisateur_connecte()$matricule,""))
+          nouveau_spec <- db_query(con,"SELECT id FROM specimens WHERE requisition_id=? AND code_barre=? LIMIT 1",params=list(rid,code))
+          if(nrow(nouveau_spec)!=1L) stop("Nouveau specimen introuvable")
+          db_execute(con,"INSERT INTO specimen_analyses (specimen_id,analyse_id,requisition_id) VALUES (?,?,?) ON CONFLICT DO NOTHING",
+            params=list(nouveau_spec$id[1],aid,rid))
         }
       }
       synchroniser_chimie_requisition(con,rid)
@@ -19004,6 +20265,31 @@ setTimeout(async function(){
       ",
       params = list(requisition_id)
     )
+
+    # Reconstituer les analyses depuis la table de liaison lorsqu'elle existe.
+    # Les anciennes requisitions restent lisibles avec leur texte historique.
+    associations_reimp <- db_query(con,
+      "SELECT sa.specimen_id,a.mnemonique,s.code_barre FROM specimen_analyses sa JOIN analyses a ON a.id=sa.analyse_id JOIN specimens s ON s.id=sa.specimen_id WHERE sa.requisition_id=? ORDER BY sa.specimen_id,a.mnemonique",
+      params=list(requisition_id))
+    if(nrow(associations_reimp)) {
+      for(ii in seq_len(nrow(etiquettes))) {
+        codes_ii <- as.character(associations_reimp$mnemonique[associations_reimp$code_barre==etiquettes$code_barre[ii]])
+        if(length(codes_ii)) etiquettes$analyses[ii] <- paste(codes_ii,collapse=", ")
+      }
+    }
+    # Contrôle des analyses prescrites avant réimpression : ne pas masquer
+    # les anomalies historiques (aucun spécimen créé pour certains tests).
+    tests_req_reimp <- db_query(con,
+      "SELECT a.mnemonique FROM requisition_analyses ra JOIN analyses a ON a.id=ra.analyse_id WHERE ra.requisition_id=?",
+      params=list(requisition_id))
+    codes_pdf_reimp <- if(nrow(associations_reimp)) toupper(trimws(as.character(associations_reimp$mnemonique))) else toupper(trimws(unlist(strsplit(paste(etiquettes$analyses,collapse=","),",",fixed=TRUE))))
+    codes_pdf_reimp <- sub("[[:space:]]*\\[.*$","",codes_pdf_reimp)
+    manquants_reimp <- setdiff(unique(toupper(trimws(as.character(tests_req_reimp$mnemonique)))),unique(codes_pdf_reimp))
+    if(length(manquants_reimp)) {
+      showNotification(paste0("ATTENTION : analyses sans étiquette : ",paste(manquants_reimp,collapse=", "),
+        ". Corriger l'affectation des spécimens avant d'imprimer."),type="error",duration=NULL)
+      return(invisible(NULL))
+    }
 
     if (nrow(etiquettes) == 0) {
       showModal(
@@ -19243,14 +20529,7 @@ setTimeout(async function(){
 
 
   output$telecharger_pdf_reimpression <- downloadHandler(
-    filename = function() {
-      p <- dernier_pdf_reimpression()
-      if (is.null(p)) {
-        "reimpression_etiquettes_selectionnees.pdf"
-      } else {
-        basename(p)
-      }
-    },
+    filename = function() nom_pdf_saisie_etiquettes(),
     content = function(file) {
       p <- dernier_pdf_reimpression()
       req(!is.null(p), file.exists(p))
