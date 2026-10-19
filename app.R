@@ -6300,6 +6300,8 @@ server <- function(input, output, session) {
           uiOutput("creation_req_message"),
           uiOutput("creation_req_pdf_zone"),
           hr(),
+          uiOutput("req_ped_panneau_admin_ui"),
+          uiOutput("req_ped_retour_etudiant_ui"),
           h3("Réquisitions pédagogiques créées"),
           div(
             class="qc-card",
@@ -16074,14 +16076,8 @@ setTimeout(async function(){
     }
   )
 
-  output$creation_pdf_download <- downloadHandler(
-    filename=function(){
-      exid <- pdf_exercice_selectionne()
-      nom_pdf_patient_requisition(exid)
-    },
-    contentType="application/pdf",
-    content=function(file){
-      exid <- pdf_exercice_selectionne()
+  edusillab_pdf_exercice <- function(exid,file){
+      exid <- as.integer(exid)
       if(is.null(exid)) stop("Aucune réquisition sélectionnée.")
       if(!requireNamespace("magick",quietly=TRUE))
         stop("Le package magick n'est pas installé.")
@@ -16212,9 +16208,18 @@ setTimeout(async function(){
       }
 
       edusillab_ecrire_pages_pdf(pages,file)
+  }
+
+  output$creation_pdf_download <- downloadHandler(
+    filename=function(){
+      exid <- pdf_exercice_selectionne()
+      nom_pdf_patient_requisition(exid)
+    },
+    contentType="application/pdf",
+    content=function(file){
+      edusillab_pdf_exercice(pdf_exercice_selectionne(),file)
     }
   )
-
   output$creation_req_historique <- DT::renderDT({
     req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
     refresh_exercices_requisition()
@@ -16377,6 +16382,13 @@ setTimeout(async function(){
     })
   })
 
+  output$req_ped_panneau_admin_ui <- renderUI({
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    div(class="qc-card",
+      h3("Corriger les étudiants et télécharger les réquisitions en ZIP"),
+      uiOutput("req_admin_attribution_ui"),hr())
+  })
+
   output$req_admin_attribution_ui <- renderUI({
     req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
     refresh_exercices_requisition()
@@ -16406,9 +16418,406 @@ setTimeout(async function(){
       ),
       textAreaInput("req_admin_consigne","Consigne / note pour l'étudiant",rows=2,
                     placeholder="Ex. Entrer les analyses indiquées sur la requête remise en classe."),
-      DT::DTOutput("req_admin_attributions_table")
+      DT::DTOutput("req_admin_attributions_table"),
+      tags$hr(),
+      h3("Correction des étudiants et téléchargement ZIP"),
+      p("Choisir un étudiant, sélectionner plusieurs réquisitions et télécharger les formulaires PDF remplis."),
+      selectInput("req_ped_filtre_etudiant","Filtrer par étudiant",choices=c("Tous"="")),
+      DT::DTOutput("req_ped_selection_table"),
+      selectizeInput("req_ped_ids_explicites",
+        "Sélectionner plusieurs réquisitions / patients pour le ZIP",
+        choices=character(), multiple=TRUE,
+        options=list(plugins=list("remove_button"),placeholder="Rechercher un étudiant, patient ou numéro de réquisition")),
+      fluidRow(
+        column(3, actionButton("req_ped_tout_selectionner", "Tout sélectionner", class="btn-info")),
+        column(3, actionButton("req_ped_deselectionner", "Désélectionner")),
+        column(6, strong(textOutput("req_ped_compteur", inline=TRUE)))
+      ),
+      tags$p("Pour corriger : sélectionnez une seule ligne. Pour créer un ZIP : sélectionnez plusieurs lignes."),
+      downloadButton("req_ped_zip","Télécharger les réquisitions sélectionnées (ZIP)",class="btn-success"),
+      tags$hr(),
+      uiOutput("req_ped_globale_ui"),
+      h4("Correction pédagogique détaillée, par code d’analyse"),
+      uiOutput("req_ped_correction_ui")
     )
   })
+
+  # Module de correction et export pédagogique : les évaluations sont stockées
+  # séparément pour ne jamais écraser les réponses ni les statuts étudiants.
+  req_ped_donnees <- reactive({
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    refresh_exercices_requisition()
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    req_ped_init_globale(con)
+    d <- db_query(con,"SELECT re.id AS id,re.etudiant_id AS etudiant_id,
+      COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'') AS etudiant,
+      COALESCE(p.nom,'') || ', ' || COALESCE(p.prenom,'') AS patient,
+      COALESCE(p.numero_dossier,'UNK') AS dossier,
+      CASE WHEN cg.exercice_id IS NOT NULL THEN 'CORRIGÉ'
+        ELSE re.statut END AS statut,re.date_attribution AS attribution,
+      COALESCE(cg.note,'') AS note
+      FROM requisition_exercices re
+      JOIN utilisateurs u ON u.id=re.etudiant_id
+      JOIN patients p ON p.id=re.patient_id
+      LEFT JOIN requisition_corrections_globales cg ON cg.exercice_id=re.id
+      ORDER BY re.id DESC")
+    names(d) <- c("ID","etudiant_id","Etudiant","Patient","Dossier","Statut","Attribution","Note")
+    d
+  })
+  observe({
+    d <- req_ped_donnees()
+    et <- unique(d[,c("etudiant_id","Etudiant"),drop=FALSE])
+    choix <- c("Tous les étudiants"="",setNames(as.character(et$etudiant_id),paste0(et$Etudiant," (",et$etudiant_id,")")))
+    updateSelectInput(session,"req_ped_filtre_etudiant",choices=choix,
+                      selected=if(is.null(input$req_ped_filtre_etudiant)) "" else input$req_ped_filtre_etudiant)
+  })
+  req_ped_filtres <- reactive({
+    d <- req_ped_donnees()
+    et <- suppressWarnings(as.integer(input$req_ped_filtre_etudiant))
+    if(length(et)==1L && !is.na(et)) d <- d[d$etudiant_id==et,,drop=FALSE]
+    d
+  })
+  output$req_ped_selection_table <- DT::renderDT({
+    d <- req_ped_filtres()
+    DT::datatable(d[,setdiff(names(d),"etudiant_id"),drop=FALSE],
+      rownames=FALSE,selection=list(mode="multiple",selected=NULL),
+      filter="top",options=list(pageLength=15,scrollX=TRUE))
+  },server=FALSE)
+  # Ne reconstruire les choix que lorsque les données changent.
+  # Ne JAMAIS observer la sélection elle-même : cela effaçait les choix à chaque clic.
+  observeEvent(req_ped_filtres(), {
+    d <- req_ped_filtres()
+    libelles <- paste0("REQ ",d$ID," | ",d$Etudiant," | ",d$Patient," | ",d$Dossier)
+    choix <- stats::setNames(as.character(d$ID),libelles)
+    selection <- isolate(input$req_ped_ids_explicites %||% character())
+    selection <- intersect(as.character(selection),as.character(d$ID))
+    updateSelectizeInput(session,"req_ped_ids_explicites",choices=choix,selected=selection,server=TRUE)
+  }, ignoreInit=FALSE)
+  observeEvent(input$req_ped_tout_selectionner, {
+    d <- req_ped_filtres()
+    updateSelectizeInput(session,"req_ped_ids_explicites",selected=as.character(d$ID))
+  })
+  observeEvent(input$req_ped_deselectionner, {
+    updateSelectizeInput(session,"req_ped_ids_explicites",selected=character())
+    DT::selectRows(DT::dataTableProxy("req_ped_selection_table"), NULL)
+  })
+  # Le tableau et la liste sont deux moyens indépendants de sélectionner.
+  # Ne pas écraser les sélections de la liste lorsqu'on clique dans le tableau.
+  observeEvent(input$req_ped_selection_table_rows_selected, {
+    d <- isolate(req_ped_filtres())
+    idx <- input$req_ped_selection_table_rows_selected %||% integer()
+    idx <- idx[idx>=1L & idx<=nrow(d)]
+    if(length(idx)) {
+      actuels <- isolate(input$req_ped_ids_explicites %||% character())
+      updateSelectizeInput(session,"req_ped_ids_explicites",
+        selected=unique(c(as.character(actuels),as.character(d$ID[idx]))))
+    }
+  })
+  req_ped_ids <- reactive({
+    d <- req_ped_filtres()
+    ids <- suppressWarnings(as.integer(input$req_ped_ids_explicites %||% character()))
+    unique(ids[!is.na(ids) & ids %in% d$ID])
+  })
+  output$req_ped_compteur <- renderText({
+    paste(length(req_ped_ids()), "réquisition(s) sélectionnée(s)")
+  })
+  output$req_ped_zip <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_requisitions_",format(Sys.Date(),"%Y%m%d"),".zip"),
+    contentType="application/zip",
+    content=function(file){
+      req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+      ids <- unique(req_ped_ids())
+      if(!length(ids)) stop("Sélectionnez au moins une réquisition dans le tableau.")
+      dossier <- tempfile("edusillab_zip_");dir.create(dossier)
+      on.exit(unlink(dossier,recursive=TRUE,force=TRUE),add=TRUE)
+      fichiers <- character()
+      for(id in ids){
+        cible <- file.path(dossier,paste0("requisition_",id,".pdf"))
+        tryCatch({
+          edusillab_pdf_exercice(id,cible)
+          if(file.exists(cible) && file.info(cible)$size>0) fichiers <- c(fichiers,cible)
+        },error=function(e) message("PDF requisition ",id," : ",conditionMessage(e)))
+      }
+      if(!length(fichiers)) stop("Aucun PDF généré. Vérifiez les modèles PDF et le package magick.")
+      if(!requireNamespace("zip",quietly=TRUE)) stop("Installez le package zip : install.packages('zip')")
+      zip::zipr(zipfile=file,files=basename(fichiers),root=dossier)
+    }
+  )
+  # Evaluation de la réquisition entière, sans modifier le travail original.
+  req_ped_init_globale <- function(con) {
+    db_execute(con,"CREATE TABLE IF NOT EXISTS requisition_corrections_globales (
+      exercice_id BIGINT PRIMARY KEY,
+      note TEXT, commentaire_general TEXT, erreurs_champs TEXT,
+      publie INTEGER NOT NULL DEFAULT 0,
+      corrige_par BIGINT, date_correction TEXT DEFAULT CURRENT_TIMESTAMP)")
+  }
+  output$req_ped_globale_ui <- renderUI({
+    ids <- req_ped_ids()
+    if(length(ids)!=1L) return(NULL)
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    req_ped_init_globale(con)
+    ex <- db_query(con,"SELECT re.id,re.statut,re.consigne,re.date_attribution,
+      re.date_completion,re.requisition_id,p.numero_dossier,p.nom,p.prenom,
+      p.date_naissance,p.sexe
+      FROM requisition_exercices re JOIN patients p ON p.id=re.patient_id
+      WHERE re.id=?",params=list(ids[1]))
+    if(!nrow(ex)) return(p("Réquisition introuvable."))
+    d <- db_query(con,"SELECT note,commentaire_general,erreurs_champs,publie
+      FROM requisition_corrections_globales WHERE exercice_id=?",params=list(ids[1]))
+    val <- function(col,def="") if(nrow(d) && !is.na(d[[col]][1])) as.character(d[[col]][1]) else def
+    tagList(
+      h4("Correction complète de la réquisition"),
+      p(strong("Patient : "),paste(ex$prenom[1],ex$nom[1]),
+        " | Dossier : ",ex$numero_dossier[1]," | Statut : ",ex$statut[1]),
+      p(strong("Date de naissance : "),as.character(ex$date_naissance[1]),
+        " | Sexe : ",as.character(ex$sexe[1])),
+      p(strong("Consigne : "),as.character(ex$consigne[1])),
+      p(strong("Réquisition saisie : "),as.character(ex$requisition_id[1])),
+      textInput("req_ped_note_globale","Note / résultat de l'étudiant",value=val("note")),
+      textAreaInput("req_ped_erreurs_globales",
+        "Erreurs dans l'ensemble de la réquisition (identification, dates, prélèvement, analyses, tubes, etc.)",
+        value=val("erreurs_champs"),rows=5),
+      textAreaInput("req_ped_commentaire_global",
+        "Correction générale et explications à l'étudiant",
+        value=val("commentaire_general"),rows=5),
+      checkboxInput("req_ped_publier_global",
+        "Publier la correction complète à l'étudiant",value=identical(val("publie","0"),"1")),
+      actionButton("req_ped_noter_globale","Noter et enregistrer la correction",class="btn-primary")
+    )
+  })
+  observeEvent(input$req_ped_noter_globale,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    ids <- req_ped_ids();req(length(ids)==1L)
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tryCatch({
+      req_ped_init_globale(con)
+      db_execute(con,"INSERT INTO requisition_corrections_globales
+        (exercice_id,note,commentaire_general,erreurs_champs,publie,corrige_par,date_correction)
+        VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(exercice_id) DO UPDATE SET
+        note=excluded.note,commentaire_general=excluded.commentaire_general,
+        erreurs_champs=excluded.erreurs_champs,publie=excluded.publie,
+        corrige_par=excluded.corrige_par,date_correction=CURRENT_TIMESTAMP",
+        params=list(ids[1],as.character(input$req_ped_note_globale %||% ""),
+          as.character(input$req_ped_commentaire_global %||% ""),
+          as.character(input$req_ped_erreurs_globales %||% ""),
+          as.integer(isTRUE(input$req_ped_publier_global)),
+          as.integer(utilisateur_connecte()$id)))
+      refresh_exercices_requisition(refresh_exercices_requisition()+1L)
+      showNotification("Réquisition notée : statut pédagogique CORRIGÉ enregistré.",type="message")
+    },error=function(e)showNotification(paste("Correction :",conditionMessage(e)),type="error",duration=12))
+  })
+  # Corrections par code : la saisie originale est conservée en lecture seule.
+  # Les corrections ne sont visibles à l'étudiant qu'après publication.
+  req_ped_init_corrections <- function(con) {
+    db_execute(con,"CREATE TABLE IF NOT EXISTS requisition_corrections_codes (
+      exercice_id BIGINT NOT NULL, code_analyse TEXT NOT NULL,
+      reponse_etudiant TEXT, correction_professeur TEXT,
+      commentaire TEXT, etat TEXT NOT NULL DEFAULT 'ERREUR',
+      publie INTEGER NOT NULL DEFAULT 0, corrige_par BIGINT,
+      date_correction TEXT DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(exercice_id,code_analyse))")
+  }
+  req_ped_tests <- function(con,exid) {
+    attendus <- db_query(con,"SELECT a.mnemonique AS code, a.nom AS nom
+      FROM requisition_exercice_tests t JOIN analyses a ON a.id=t.analyse_id
+      WHERE t.exercice_id=? UNION ALL
+      SELECT mnemonique AS code, COALESCE(nom,'') AS nom
+      FROM requisition_exercice_tests_manuels WHERE exercice_id=?",
+      params=list(exid,exid))
+    saisies <- db_query(con,"SELECT a.mnemonique AS code, a.nom AS nom
+      FROM requisition_exercices e
+      JOIN requisition_analyses ra ON ra.requisition_id=e.requisition_id
+      JOIN analyses a ON a.id=ra.analyse_id WHERE e.id=?",params=list(exid))
+    codes <- unique(c(as.character(attendus$code),as.character(saisies$code)))
+    codes <- codes[!is.na(codes) & nzchar(codes)]
+    data.frame(code=codes,
+      attendu=ifelse(codes %in% attendus$code,"OUI","NON"),
+      saisi=ifelse(codes %in% saisies$code,"OUI","NON"),
+      stringsAsFactors=FALSE)
+  }
+  output$req_ped_correction_ui <- renderUI({
+    ids <- req_ped_ids()
+    if(length(ids)!=1L) return(p("Sélectionnez une seule réquisition pour voir ses codes d'analyses et la corriger."))
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    req_ped_init_corrections(con)
+    d <- req_ped_tests(con,ids[1])
+    corrections <- db_query(con,"SELECT code_analyse,correction_professeur,commentaire,etat,publie
+      FROM requisition_corrections_codes WHERE exercice_id=?",params=list(ids[1]))
+    choix <- unique(c(d$code,as.character(corrections$code_analyse)))
+    code_choisi <- as.character(input$req_ped_code %||% "")
+    if(!code_choisi %in% choix) code_choisi <- if(length(choix)) choix[1] else ""
+    ligne <- d[d$code==code_choisi,,drop=FALSE]
+    corr <- corrections[corrections$code_analyse==code_choisi,,drop=FALSE]
+    val <- function(col,def="") if(nrow(corr) && !is.na(corr[[col]][1])) as.character(corr[[col]][1]) else def
+    tagList(
+      h5(paste("Réquisition",ids[1])),
+      p("Les codes attendus et les codes saisis sont comparés ci-dessous. La réponse originale de l'étudiant n'est jamais modifiée."),
+      DT::datatable(d,rownames=FALSE,options=list(dom='t',pageLength=100),selection='none'),
+      selectizeInput("req_ped_code","Code d'analyse à corriger",choices=choix,selected=code_choisi,
+                     options=list(create=TRUE,placeholder="Saisir un code si absent")),
+      p(strong("Attendu : "),if(nrow(ligne)) ligne$attendu[1] else "Code ajouté par le professeur",
+        " — ",strong("Saisi par l'étudiant : "),if(nrow(ligne)) ligne$saisi[1] else "NON"),
+      selectInput("req_ped_etat","Évaluation",choices=c("Erreur"="ERREUR","Correct"="CORRECT","À vérifier"="A_VERIFIER"),selected=val("etat","ERREUR")),
+      textInput("req_ped_reponse_corrigee","Code / réponse correcte",value=val("correction_professeur",code_choisi)),
+      textAreaInput("req_ped_commentaire_code","Explication de l'erreur et correction",value=val("commentaire"),rows=4),
+      checkboxInput("req_ped_publier","Afficher cette correction à l'étudiant",value=identical(val("publie","0"),"1")),
+      actionButton("req_ped_enregistrer_code","Enregistrer la correction de ce code",class="btn-primary"),
+      tags$hr(),downloadButton("req_ped_correction_pdf", "Télécharger la correction en PDF", class="btn-success"),
+      h5("Corrections enregistrées"),
+      DT::datatable(corrections,rownames=FALSE,options=list(pageLength=10,scrollX=TRUE))
+    )
+  })
+  observeEvent(input$req_ped_enregistrer_code,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    ids <- req_ped_ids();req(length(ids)==1L)
+    code <- toupper(trimws(as.character(input$req_ped_code %||% "")))
+    if(!nzchar(code)) {showNotification("Indiquez le code de l'analyse.",type="error");return()}
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tryCatch({
+      req_ped_init_corrections(con)
+      d <- req_ped_tests(con,ids[1]); ligne <- d[d$code==code,,drop=FALSE]
+      original <- if(nrow(ligne) && ligne$saisi[1]=="OUI") code else "ABSENT"
+      db_execute(con,"INSERT INTO requisition_corrections_codes
+        (exercice_id,code_analyse,reponse_etudiant,correction_professeur,commentaire,etat,publie,corrige_par,date_correction)
+        VALUES (?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(exercice_id,code_analyse) DO UPDATE SET
+        reponse_etudiant=excluded.reponse_etudiant,
+        correction_professeur=excluded.correction_professeur,
+        commentaire=excluded.commentaire,etat=excluded.etat,
+        publie=excluded.publie,corrige_par=excluded.corrige_par,date_correction=CURRENT_TIMESTAMP",
+        params=list(ids[1],code,original,as.character(input$req_ped_reponse_corrigee %||% ""),
+          as.character(input$req_ped_commentaire_code %||% ""),as.character(input$req_ped_etat),
+          as.integer(isTRUE(input$req_ped_publier)),utilisateur_connecte()$id))
+      showNotification("Correction enregistrée. La réponse originale est conservée.",type="message")
+      refresh_exercices_requisition(refresh_exercices_requisition()+1L)
+    },error=function(e)showNotification(conditionMessage(e),type="error",duration=12))
+  })
+  output$req_ped_retour_etudiant_ui <- renderUI({
+    req(toupper(utilisateur_connecte()$role)=="ETUDIANT")
+    refresh_exercices_requisition()
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    req_ped_init_globale(con)
+    g <- db_query(con,"SELECT e.id AS requisition, cg.note,
+      cg.erreurs_champs, cg.commentaire_general
+      FROM requisition_corrections_globales cg
+      JOIN requisition_exercices e ON e.id=cg.exercice_id
+      WHERE e.etudiant_id=? AND cg.publie=1 ORDER BY e.id DESC",
+      params=list(utilisateur_connecte()$id))
+    if(!"requisition_corrections_codes" %in% edusillab_tables(con)) return(
+      if(nrow(g)) div(class="qc-card",h3("Mes réquisitions corrigées"),
+        DT::datatable(g,rownames=FALSE),
+        selectInput("req_ped_pdf_etudiant_id","Réquisition corrigée",
+          choices=setNames(as.character(g$requisition),paste("Réquisition",g$requisition))),
+        downloadButton("req_ped_correction_etudiant_pdf","Télécharger ma correction PDF")) else NULL)
+    d <- db_query(con,"SELECT e.id AS requisition, p.nom || ', ' || p.prenom AS patient,
+      c.code_analyse AS code, c.reponse_etudiant AS reponse_originale,
+      c.correction_professeur AS correction, c.commentaire, c.etat
+      FROM requisition_corrections_codes c
+      JOIN requisition_exercices e ON e.id=c.exercice_id
+      JOIN patients p ON p.id=e.patient_id
+      WHERE e.etudiant_id=? AND c.publie=1
+      ORDER BY e.id DESC,c.code_analyse",params=list(utilisateur_connecte()$id))
+    if(!nrow(d) && !nrow(g)) return(NULL)
+    ids_disponibles <- unique(c(as.character(d$requisition),as.character(g$requisition)))
+    div(class="qc-card",h3("Mes corrections de réquisitions"),
+      if(nrow(g)) tagList(h4("Correction de l'ensemble de la réquisition"),
+        DT::datatable(g,rownames=FALSE,options=list(pageLength=10,scrollX=TRUE))),
+      p("Voici votre saisie originale et les corrections publiées par votre professeur."),
+      if(nrow(d)) DT::datatable(d,rownames=FALSE,options=list(pageLength=10,scrollX=TRUE)),
+      selectInput("req_ped_pdf_etudiant_id", "Réquisition corrigée à télécharger",
+        choices=setNames(ids_disponibles,paste("Réquisition",ids_disponibles))),
+      downloadButton("req_ped_correction_etudiant_pdf", "Télécharger ma correction (PDF)")
+    )
+  })
+
+  # PDF de correction : conserve les réponses originales et indique la correction.
+  req_ped_pdf_creer <- function(exercice_id, fichier, seulement_publie=FALSE) {
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    ex <- db_query(con,"SELECT re.id, re.etudiant_id, p.nom AS patient_nom,
+      p.prenom AS patient_prenom, u.nom AS etudiant_nom, u.prenom AS etudiant_prenom
+      FROM requisition_exercices re JOIN patients p ON p.id=re.patient_id
+      JOIN utilisateurs u ON u.id=re.etudiant_id WHERE re.id=?",params=list(exercice_id))
+    if(nrow(ex)!=1L) stop("Réquisition introuvable.")
+    role <- toupper(as.character(utilisateur_connecte()$role))
+    if(role=="ETUDIANT" && as.integer(ex$etudiant_id[1])!=as.integer(utilisateur_connecte()$id))
+      stop("Accès interdit à la correction d'un autre étudiant.")
+    if(!role %in% c("ADMIN","SUPERUTILISATEUR","ETUDIANT")) stop("Accès interdit.")
+    if(!"requisition_corrections_codes" %in% edusillab_tables(con)) stop("Aucune correction disponible.")
+    sql <- paste0("SELECT code_analyse,reponse_etudiant,correction_professeur,commentaire,etat,publie,date_correction
+      FROM requisition_corrections_codes WHERE exercice_id=?",
+      if(seulement_publie || role=="ETUDIANT") " AND publie=1" else "",
+      " ORDER BY code_analyse")
+    d <- db_query(con,sql,params=list(exercice_id))
+    req_ped_init_globale(con)
+    global <- db_query(con,"SELECT note,commentaire_general,erreurs_champs,publie
+      FROM requisition_corrections_globales WHERE exercice_id=?",params=list(exercice_id))
+    if((seulement_publie || role=="ETUDIANT") && nrow(global))
+      global <- global[global$publie==1,,drop=FALSE]
+    if(!nrow(d) && !nrow(global)) stop("Aucune correction accessible pour cette réquisition.")
+    grDevices::pdf(fichier,width=8.27,height=11.69,paper="special",family="Helvetica",onefile=TRUE)
+    on.exit(grDevices::dev.off(),add=TRUE)
+    y <- 0
+    nouvelle_page <- function() {
+      graphics::par(mar=c(0,0,0,0));graphics::plot.new()
+      graphics::plot.window(xlim=c(0,1),ylim=c(0,1)); y <<- 0.94
+      graphics::text(0.06,y,"EDUSILLAB — CORRECTION DE RÉQUISITION",adj=c(0,0.5),font=2,cex=1.1)
+      y <<- y-0.04
+      graphics::text(0.06,y,paste("Réquisition :",exercice_id),adj=c(0,0.5),cex=0.8)
+      y <<- y-0.025
+      graphics::text(0.06,y,paste("Étudiant :",ex$etudiant_prenom[1],ex$etudiant_nom[1]),adj=c(0,0.5),cex=0.8)
+      y <<- y-0.025
+      graphics::text(0.06,y,paste("Patient :",ex$patient_prenom[1],ex$patient_nom[1]),adj=c(0,0.5),cex=0.8)
+      y <<- y-0.04
+    }
+    ecrire <- function(libelle,valeur) {
+      val <- as.character(valeur %||% "")
+      if(is.na(val)) val <- ""
+      lignes <- strwrap(paste0(libelle,val),width=88)
+      if(!length(lignes)) lignes <- " "
+      if(y-(length(lignes)*0.021)<0.07) nouvelle_page()
+      for(l in lignes) {
+        graphics::text(0.07,y,l,adj=c(0,0.5),cex=0.72)
+        y <<- y-0.021
+      }
+    }
+    nouvelle_page()
+    if(nrow(global)) {
+      ecrire("NOTE / RÉSULTAT : ",global$note[1])
+      ecrire("ERREURS DE LA RÉQUISITION : ",global$erreurs_champs[1])
+      ecrire("CORRECTION GÉNÉRALE : ",global$commentaire_general[1])
+      y <- y-0.02
+    }
+    for(i in seq_len(nrow(d))) {
+      if(y<0.20) nouvelle_page()
+      ecrire("CODE : ",d$code_analyse[i])
+      ecrire("Réponse originale : ",d$reponse_etudiant[i])
+      ecrire("Correction du professeur : ",d$correction_professeur[i])
+      ecrire("Évaluation : ",d$etat[i])
+      ecrire("Commentaire : ",d$commentaire[i])
+      y <- y-0.02
+    }
+    invisible(fichier)
+  }
+  output$req_ped_correction_pdf <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_correction_",req_ped_ids()[1],".pdf"),
+    contentType="application/pdf",
+    content=function(file) {
+      ids <- req_ped_ids();req(length(ids)==1L)
+      req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+      req_ped_pdf_creer(ids[1],file,FALSE)
+    }
+  )
+  output$req_ped_correction_etudiant_pdf <- downloadHandler(
+    filename=function() paste0("EDUSILLAB_ma_correction_",input$req_ped_pdf_etudiant_id,".pdf"),
+    contentType="application/pdf",
+    content=function(file) {
+      req(toupper(utilisateur_connecte()$role)=="ETUDIANT")
+      id <- suppressWarnings(as.integer(input$req_ped_pdf_etudiant_id))
+      req(length(id)==1L,!is.na(id))
+      req_ped_pdf_creer(id,file,TRUE)
+    }
+  )
 
   output$req_admin_attributions_table <- DT::renderDT({
     req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
@@ -17449,10 +17858,7 @@ setTimeout(async function(){
           if(!length(indices)) next
           blocs <- split(indices,ceiling(seq_along(indices)/9L))
           for(bloc in blocs) {
-          # Les positions du bloc sont relatives a `indices`, pas a `gd`.
-          # Sans cette conversion, une analyse multi-tubes peut etre affectee
-          # au mauvais specimen et faire echouer la validation transactionnelle.
-          gt <- gd[indices[bloc],,drop=FALSE]
+          gt <- gd[bloc,,drop=FALSE]
           analyses_attribuees <- c(analyses_attribuees,as.integer(gt$id))
           attendus_associations <- c(attendus_associations,as.integer(gt$id))
           analyses_label <- paste(unique(ifelse(
@@ -17537,7 +17943,6 @@ setTimeout(async function(){
 
     }, error = function(e) {
       erreur <<- TRUE
-      message("EDUSILLAB / creation requisition : ", conditionMessage(e))
       try(DBI::dbRollback(con), silent = TRUE)
 
       output$req_message <- renderUI(
