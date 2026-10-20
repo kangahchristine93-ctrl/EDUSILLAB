@@ -1750,6 +1750,23 @@ ajouter_colonne_si_absente(con,"requisition_exercices","commentaire_y","REAL")
 ajouter_colonne_si_absente(con,"requisition_exercices","date_prelevement","TEXT")
 ajouter_colonne_si_absente(con,"requisition_exercices","heure_prelevement","TEXT")
 ajouter_colonne_si_absente(con,"requisition_exercices","location_prelevement","TEXT")
+# Répertoire partagé des médecins et des cliniques.
+db_execute(con,"CREATE TABLE IF NOT EXISTS repertoire_medecins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL,
+  actif INTEGER NOT NULL DEFAULT 1)")
+db_execute(con,"CREATE TABLE IF NOT EXISTS repertoire_cliniques (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, nom TEXT NOT NULL,
+  actif INTEGER NOT NULL DEFAULT 1)")
+ajouter_colonne_si_absente(con,"requisition_exercices","medecin_referent","TEXT")
+ajouter_colonne_si_absente(con,"requisition_exercices","clinique_referente","TEXT")
+ajouter_colonne_si_absente(con,"requisition_exercices","complement_pdf","TEXT")
+# Origine du prélèvement pour les réquisitions de microbiologie.
+ajouter_colonne_si_absente(con,"requisition_exercices","micro_origine","TEXT")
+ajouter_colonne_si_absente(con,"requisition_exercices","micro_origine_marquer","INTEGER")
+ajouter_colonne_si_absente(con,"requisition_exercices","micro_origine_x","REAL")
+ajouter_colonne_si_absente(con,"requisition_exercices","micro_origine_y","REAL")
+
+
 
 
 
@@ -6227,6 +6244,21 @@ server <- function(input, output, session) {
               column(4,textInput("creation_req_pays","Pays",value="Canada"))
             )
           ),
+          div(class="qc-card",
+            h4("Médecin prescripteur et clinique / location"),
+            fluidRow(
+              column(6,selectizeInput("creation_req_medecin","Médecin prescripteur",choices=c("Aucun"=""),options=list(placeholder="Choisir un médecin"))),
+              column(6,selectizeInput("creation_req_clinique","Clinique / location",choices=c("Aucune"=""),options=list(placeholder="Choisir une clinique")))
+            ),
+            fluidRow(
+              column(5,textInput("creation_nouveau_medecin","Ajouter un médecin à la liste",
+                                 placeholder="Dr Nom Prénom")),
+              column(2,br(),actionButton("creation_ajouter_medecin","Ajouter")),
+              column(4,textInput("creation_nouvelle_clinique","Ajouter une clinique / location",
+                                 placeholder="Clinique ou service")),
+              column(1,br(),actionButton("creation_ajouter_clinique","Ajouter"))
+            )
+          ),
           uiOutput("creation_req_coordonnees_patient"),
           fluidRow(
             column(
@@ -6255,6 +6287,7 @@ server <- function(input, output, session) {
               )
             )
           ),
+          uiOutput("creation_req_micro_origine_ui"),
           textAreaInput(
             "creation_req_commentaire",
             "Commentaire à inscrire sur la réquisition",
@@ -6302,7 +6335,8 @@ server <- function(input, output, session) {
           hr(),
           uiOutput("req_ped_panneau_admin_ui"),
           uiOutput("req_ped_retour_etudiant_ui"),
-          h3("Réquisitions pédagogiques créées"),
+          h3("Réquisitions attribuées — étudiant et patient"),
+          p("Chaque ligne affiche le nom de l'étudiant et celui du patient attribué. Les PDF indiquent également le nom de l'étudiant dans le coin supérieur droit."),
           div(
             class="qc-card",
             fluidRow(
@@ -7020,6 +7054,12 @@ server <- function(input, output, session) {
             column(4, checkboxInput("outstanding_recu","Afficher REÇU",TRUE)),
             column(4, checkboxInput("outstanding_colb","Afficher COLB",TRUE)),
             column(4, checkboxInput("outstanding_ord","Afficher ORD",TRUE))
+          ),
+          fluidRow(
+            column(6, dateRangeInput("outstanding_dates","Intervalle de dates",
+              start=NULL,end=NULL,format="yyyy-mm-dd",language="fr",
+              separator=" au ")),
+            column(6, helpText("Filtre sur la date de réception (REÇU), de génération d'étiquette (COLB) ou de saisie (ORD). Laissez vide pour afficher toutes les dates."))
           ),
           br(),
           uiOutput("outstanding_resume"),
@@ -8559,11 +8599,12 @@ server <- function(input, output, session) {
       paste0(
         base_sql,
         "
-        WHERE substr(COALESCE(s.date_specimen,''),1,10) >= date('now','localtime','-7 day')
+        WHERE substr(COALESCE(s.date_specimen,''),1,10) >= ?
         ORDER BY s.id DESC
-        LIMIT 500
+        LIMIT 5000
         "
-      )
+      ),
+      params=list(as.character(Sys.Date()-30L))
     )
 
     if (nrow(candidats)==0) return(data.frame())
@@ -9060,6 +9101,21 @@ server <- function(input, output, session) {
     }
   )
 
+  # Fiche de réception cumulative : lors d'une réception ultérieure,
+  # afficher les tubes déjà reçus de la même réquisition, dans l'ordre.
+  actualiser_fiche_reception_cumulative <- function(con, requisition_ids) {
+    requisition_ids <- unique(as.integer(requisition_ids))
+    requisition_ids <- requisition_ids[!is.na(requisition_ids)]
+    if (!length(requisition_ids)) return(invisible(NULL))
+    marqueurs <- paste(rep("?",length(requisition_ids)),collapse=",")
+    d <- db_query(con,paste0(
+      "SELECT id FROM specimens WHERE requisition_id IN (",marqueurs,")
+       AND UPPER(TRIM(COALESCE(statut_reception,'')))='RECU'
+       ORDER BY date_reception,id"),params=as.list(requisition_ids))
+    derniere_reception_pdf_ids(as.integer(d$id))
+    invisible(NULL)
+  }
+
   observeEvent(input$cancel_reception_specimen, {
     derniere_reception_pdf_ids(integer(0))
     specimen_reception(NULL)
@@ -9171,7 +9227,7 @@ server <- function(input, output, session) {
       patient_id=s$patient_id[1],requisition_id=s$requisition_id[1],specimen_id=s$id[1]
     )
 
-    derniere_reception_pdf_ids(as.integer(s$id[1]))
+    actualiser_fiche_reception_cumulative(con,s$requisition_id[1])
     showNotification(
       "Spécimen reçu. La fiche PDF de réception est prête.",
       type="message",
@@ -9344,11 +9400,14 @@ server <- function(input, output, session) {
           if (n_retard>0)
             p(
               strong("Attention : "),
-              paste0(
-                n_retard,
-                " tube(s) ont une date antérieure. Leur date sera conservée en réception multiple. Pour modifier une date, recevez le tube individuellement."
-              )
-            )
+              paste0(n_retard," tube(s) ont une date antérieure. Choisissez si vous souhaitez conserver leur date originale ou utiliser la date d'aujourd'hui.")
+            ),
+          if (n_retard>0) radioButtons(
+            "reception_multiple_changement_date",
+            "Date des tubes antérieurs",
+            choices=c("Non — conserver les dates originales"="non",
+                      "Oui — changer les dates antérieures à aujourd'hui et générer les nouvelles étiquettes"="oui"),
+            selected="non")
         ),
         p(
           strong("Heure de collecte : "),
@@ -9396,12 +9455,15 @@ server <- function(input, output, session) {
     },add=TRUE)
 
     recus <- list()
+    changer_dates_anciennes <- identical(input$reception_multiple_changement_date,"oui")
+    labels_a_regenerer <- integer(0)
 
     for (i in seq_len(nrow(d))) {
       courant <- db_query(
         con,
         "
         SELECT id,patient_id,requisition_id,numero_specimen,code_barre,
+               date_specimen,px,priorite,
                COALESCE(statut_reception,'') AS statut_reception
         FROM specimens
         WHERE id=?
@@ -9413,24 +9475,37 @@ server <- function(input, output, session) {
       statut <- toupper(norm_txt(courant$statut_reception[1]))
       if (statut %in% c("RECU","ANNULE")) next
 
-      db_execute(
-        con,
-        "
-        UPDATE specimens
-        SET recu_par=?,recu_initiales=?,recu_matricule=?,
+      date_courante <- suppressWarnings(as.Date(courant$date_specimen[1]))
+      modifier_date <- changer_dates_anciennes && !is.na(date_courante) &&
+        date_courante < Sys.Date()
+      if(modifier_date) {
+        nouveau_numero <- generer_numero_specimen(
+          con,Sys.Date(),courant$px[1],courant$priorite[1])
+        db_execute(con,"
+          UPDATE specimens SET
+            date_specimen_originale=COALESCE(date_specimen_originale,date_specimen),
+            numero_specimen_original=COALESCE(numero_specimen_original,numero_specimen),
+            date_specimen=?,numero_specimen=?,
+            recu_par=?,recu_initiales=?,recu_matricule=?,
+            heure_collecte_recue=?,initiales_preleveur=?,
+            date_reception=CURRENT_TIMESTAMP,statut_reception='RECU',
+            etiquette_generee=1,date_etiquette_generee=CURRENT_TIMESTAMP
+          WHERE id=?",
+          params=list(as.character(Sys.Date()),nouveau_numero,
+            utilisateur_connecte()$id,utilisateur_connecte()$initiales,
+            utilisateur_connecte()$matricule,heure,initiales,courant$id[1]))
+        labels_a_regenerer <- c(labels_a_regenerer,as.integer(courant$id[1]))
+        courant$numero_specimen[1] <- nouveau_numero
+      } else {
+        db_execute(con,"
+          UPDATE specimens SET recu_par=?,recu_initiales=?,recu_matricule=?,
             heure_collecte_recue=?,initiales_preleveur=?,
             date_reception=CURRENT_TIMESTAMP,statut_reception='RECU'
-        WHERE id=?
-        ",
-        params=list(
-          utilisateur_connecte()$id,
-          utilisateur_connecte()$initiales,
-          utilisateur_connecte()$matricule,
-          heure,
-          initiales,
-          courant$id[1]
-        )
-      )
+          WHERE id=?",
+          params=list(utilisateur_connecte()$id,
+            utilisateur_connecte()$initiales,utilisateur_connecte()$matricule,
+            heure,initiales,courant$id[1]))
+      }
 
       recus[[length(recus)+1L]] <- courant
     }
@@ -9450,6 +9525,34 @@ server <- function(input, output, session) {
     )
 
     removeModal()
+    if(length(labels_a_regenerer)) {
+      tryCatch({
+        marks <- paste(rep("?",length(labels_a_regenerer)),collapse=",")
+        nouvelles <- db_query(con,paste0("
+          SELECT r.numero_requisition,s.numero_specimen,s.code_barre,
+            p.nom,p.prenom,p.numero_dossier,p.medicare,p.sexe,
+            COALESCE(s.location,'') AS location,
+            COALESCE(s.analyses,'') AS analyses,
+            COALESCE(s.quantite,'N/P') AS quantite,
+            COALESCE(s.contenant,'NON PRECISE') AS contenant,
+            COALESCE(s.departement,'') AS departement,
+            COALESCE(s.px,'') AS px,
+            TRIM(COALESCE(uc.prenom,'') || ' ' || COALESCE(uc.nom,'')) AS saisi_nom_complet,
+            COALESCE(s.date_creation,'') AS date_saisie,
+            COALESCE(NULLIF(s.saisi_initiales,''),uc.initiales,'') AS signature_initiales
+          FROM specimens s JOIN requisitions r ON r.id=s.requisition_id
+          JOIN patients p ON p.id=s.patient_id
+          LEFT JOIN utilisateurs uc ON uc.id=s.cree_par
+          WHERE s.id IN (",marks,") ORDER BY s.id"),
+          params=as.list(labels_a_regenerer))
+        f <- file.path(preview_dir,paste0("etiquettes_dates_corrigees_",
+          format(Sys.time(),"%Y%m%d_%H%M%S"),".pdf"))
+        creer_pdf_partage_ou_individuel(nouvelles,f,con,utilisateur_connecte()$id)
+        pdf_reception_corrige(f)
+      },error=function(e)showNotification(paste(
+        "Tubes reçus, mais étiquettes corrigées non générées :",conditionMessage(e)),
+        type="warning",duration=NULL))
+    }
 
     for (r in recus) {
       journaliser(
@@ -9565,6 +9668,7 @@ server <- function(input, output, session) {
     )
 
     pdf_reception_corrige(NULL)
+    actualiser_fiche_reception_cumulative(con,s$requisition_id[1])
 
     if (isTRUE(changer_date)) {
       label <- db_query(
@@ -12179,8 +12283,9 @@ server <- function(input, output, session) {
       FROM specimens
       WHERE UPPER(COALESCE(statut_reception,'')) <> 'ANNULE'
       ORDER BY px")
-    choix <- c("Tous"="", setNames(d$px,d$px))
-    updateSelectizeInput(session,"outstanding_px",choices=choix,selected="",server=TRUE)
+    choix <- c("Tous les PX"="__TOUS__", setNames(d$px,d$px))
+    updateSelectizeInput(session,"outstanding_px",choices=choix,
+      selected=isolate(input$outstanding_px %||% "__TOUS__"),server=TRUE)
   })
 
   output$outstanding_departement_ui <- renderUI({
@@ -12190,7 +12295,7 @@ server <- function(input, output, session) {
     on.exit(DBI::dbDisconnect(con), add=TRUE)
     uact <- utilisateur_connecte()
     if (toupper(uact$role) %in% c("ADMIN","SUPERUTILISATEUR")) {
-      if (nzchar(px) && px != "SANS PX") {
+      if (nzchar(px) && !px %in% c("SANS PX","__TOUS__")) {
         d <- db_query(con,
           "SELECT DISTINCT departement FROM departements_px WHERE UPPER(COALESCE(px,''))=UPPER(?) ORDER BY departement",
           params=list(px))
@@ -12201,12 +12306,12 @@ server <- function(input, output, session) {
     } else {
       autor <- departements_autorises_utilisateur(con,uact$id,uact$role)
       d <- data.frame(departement=autor$nom,stringsAsFactors=FALSE)
-      if (nzchar(px) && px != "SANS PX" && nrow(autor)>0)
+      if (nzchar(px) && !px %in% c("SANS PX","__TOUS__") && nrow(autor)>0)
         d <- data.frame(departement=autor$nom[toupper(autor$px)==toupper(px)],stringsAsFactors=FALSE)
     }
     selectizeInput("outstanding_departement","Département",
-      choices=c("Tous"="",setNames(d$departement,d$departement)),
-      selected="",multiple=FALSE)
+      choices=c("Tous les départements"="__TOUS__",setNames(d$departement,d$departement)),
+      selected="__TOUS__",multiple=FALSE)
   })
 
   donnees_outstanding <- reactive({
@@ -12243,8 +12348,12 @@ server <- function(input, output, session) {
           COALESCE(s.priorite,'') AS Priorite,
           COALESCE(s.date_creation,'') AS `Date saisie`,
           COALESCE(s.date_etiquette_generee,'') AS `Etiquette generee`,
-          COALESCE(s.date_reception,'') AS `Date reception`
+          COALESCE(s.date_reception,'') AS `Date reception`,
+          TRIM(COALESCE(ur.prenom,'') || ' ' || COALESCE(ur.nom,'')) AS `Recu par`,
+          COALESCE(s.recu_initiales,'') AS `Initiales reception`,
+          COALESCE(s.recu_matricule,'') AS `Matricule reception`
         FROM specimens s
+        LEFT JOIN utilisateurs ur ON ur.id=s.recu_par
         JOIN patients p ON p.id=s.patient_id
         JOIN requisitions r ON r.id=s.requisition_id
         WHERE UPPER(COALESCE(s.statut_reception,'')) <> 'ANNULE'
@@ -12256,9 +12365,16 @@ server <- function(input, output, session) {
       }
     )
 
+    # PostgreSQL replie les alias SQL non cités en minuscules.
+    # Restaurer les noms attendus par les filtres et le tableau.
+    noms_attendus <- c("id","Statut","PX","Departement","Specimen",
+      "BC#","Requisition","Dossier","Patient","Analyses","Tube",
+      "Priorite","Date saisie","Etiquette generee","Date reception",
+      "Recu par","Initiales reception","Matricule reception")
+    if (ncol(d)==length(noms_attendus)) names(d) <- noms_attendus
     if (nrow(d)==0) return(d)
 
-    if (nzchar(px)) {
+    if (nzchar(px) && px != "__TOUS__") {
       if (toupper(px)=="SANS PX") {
         d <- d[!nzchar(trimws(as.character(d$PX))),,drop=FALSE]
       } else {
@@ -12266,7 +12382,7 @@ server <- function(input, output, session) {
       }
     }
 
-    if (nzchar(dep) && nrow(d)>0) {
+    if (nzchar(dep) && dep != "__TOUS__" && nrow(d)>0) {
       d <- d[toupper(trimws(as.character(d$Departement)))==toupper(dep),,drop=FALSE]
     }
 
@@ -12283,6 +12399,18 @@ server <- function(input, output, session) {
                   (nzchar(d$PX) & toupper(d$PX) %in% px_autorises)
         d <- d[ok_dep,,drop=FALSE]
       }
+    }
+
+    # Appliquer la période à la date de l'événement correspondant au statut.
+    periode <- input$outstanding_dates
+    if (!is.null(periode) && length(periode)==2L &&
+        all(!is.na(periode)) && nrow(d)>0) {
+      date_evenement <- ifelse(d$Statut=="REÇU",as.character(d[["Date reception"]]),
+        ifelse(d$Statut=="COLB",as.character(d[["Etiquette generee"]]),
+               as.character(d[["Date saisie"]])))
+      dates <- suppressWarnings(as.Date(substr(date_evenement,1L,10L)))
+      debut <- as.Date(periode[1]); fin <- as.Date(periode[2])
+      d <- d[!is.na(dates) & dates>=debut & dates<=fin,,drop=FALSE]
     }
 
     garder <- character(0)
@@ -12313,7 +12441,7 @@ server <- function(input, output, session) {
     d <- donnees_outstanding()
     if (is.null(d) || nrow(d)==0 || ncol(d)==0) {
       return(DT::datatable(
-        data.frame(Message="Aucun spécimen correspondant aux filtres."),
+        data.frame(Message="Aucun spécimen correspondant aux filtres. Vérifiez le département et les cases REÇU / COLB / ORD."),
         rownames=FALSE,options=list(dom="t")
       ))
     }
@@ -14136,7 +14264,8 @@ server <- function(input, output, session) {
     req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
     refresh_modeles_requisition()
 
-    try(restaurer_modeles_pdf_depuis_db(),silent=TRUE)
+    restauration_err <- tryCatch({restaurer_modeles_pdf_depuis_db();NULL},
+      error=function(e) conditionMessage(e))
 
     con <- ouvrir_db()
     on.exit(try(DBI::dbDisconnect(con),silent=TRUE),add=TRUE)
@@ -14168,8 +14297,14 @@ server <- function(input, output, session) {
 
     lib <- paste0(d$nom,ifelse(disponible,""," — PDF à retéléverser"))
     choix <- setNames(as.character(d$id),lib)
-    selectInput("creation_modele_id","Réquisition PDF à utiliser",
-                choices=choix,selected=as.character(d$id[1]))
+    tagList(
+      if(!is.null(restauration_err)) div(class="warning-box",
+        paste("Restauration des PDF :",restauration_err)),
+      selectInput("creation_modele_id","Réquisition PDF à utiliser",
+        choices=choix,selected=as.character(d$id[1])),
+      if(any(!disponible)) div(class="warning-box",
+        "Certains modèles existent dans la base mais leur PDF n'est pas disponible sur ce serveur. ",
+        "Vérifiez la connexion Neon et le stockage des fichiers PDF."))
   })
 
   champs_patient_requisition <- c(
@@ -14186,7 +14321,9 @@ server <- function(input, output, session) {
     "PAYS"="Pays",
     "DATE_PRELEVEMENT"="Date de prélèvement",
     "HEURE_PRELEVEMENT"="Heure de prélèvement",
-    "LOCATION_PRELEVEMENT"="Location / lieu de prélèvement"
+    "LOCATION_PRELEVEMENT"="Location / lieu de prélèvement",
+    "MEDECIN_REFERENT"="Médecin prescripteur",
+    "CLINIQUE_REFERENTE"="Clinique / location"
   )
 
   initialiser_champs_patient_modele <- function(modele_id) {
@@ -14198,11 +14335,20 @@ server <- function(input, output, session) {
     defaults <- data.frame(
       champ=names(champs_patient_requisition),
       page=1L,
-      x=c(.18,.38,.55,.38,.62,.72,.18,.18,.38,.55,.68,.18,.38,.58),
-      y=c(.16,.16,.16,.23,.16,.16,.20,.23,.23,.23,.23,.27,.27,.27),
-      taille=c(12,12,11,11,10,11,10,10,10,10,10,11,11,11),
+      x=c(.18,.38,.55,.38,.62,.72,.18,.18,.38,.55,.68,.18,.38,.58,.26,.09),
+      y=c(.16,.16,.16,.23,.16,.16,.20,.23,.23,.23,.23,.27,.27,.27,.18,.23),
+      taille=c(12,12,11,11,10,11,10,10,10,10,10,11,11,11,11,11),
       stringsAsFactors=FALSE
     )
+    # Corriger les anciennes positions automatiques des deux champs médicaux,
+    # sans écraser les positions personnalisées déjà enregistrées.
+    for (spec in list(
+      list(ch="MEDECIN_REFERENT",oldx=.18,oldy=.31,x=.26,y=.18),
+      list(ch="CLINIQUE_REFERENTE",oldx=.55,oldy=.31,x=.09,y=.23))) {
+      db_execute(con,"UPDATE requisition_modele_champs SET x=?,y=?
+        WHERE modele_id=? AND champ=? AND ABS(x-?)<0.0001 AND ABS(y-?)<0.0001",
+        params=list(spec$x,spec$y,modele_id,spec$ch,spec$oldx,spec$oldy))
+    }
     add <- defaults[!defaults$champ %in% existants,,drop=FALSE]
     if(nrow(add)>0) {
       for(i in seq_len(nrow(add))) {
@@ -14571,6 +14717,48 @@ server <- function(input, output, session) {
     "FER","FERR","B12","FOL","HBA1C"
   )
 
+  creation_req_type_modele <- reactive({
+    mid <- suppressWarnings(as.integer(input$creation_modele_id))
+    if(length(mid)!=1L || is.na(mid)) return("GENERAL")
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d<-tryCatch(db_query(con,"SELECT nom FROM requisition_modeles WHERE id=?",
+      params=list(mid)),error=function(e)data.frame())
+    if(!nrow(d)) return("GENERAL")
+    nom<-toupper(iconv(as.character(d$nom[1]),to="ASCII//TRANSLIT"))
+    if(grepl("MICRO|BACTERIO|CULTURE",nom)) return("MICRO")
+    if(grepl("VITALITE|HORIZON|BIOCHIM|CHIMIE",nom)) return("BIO")
+    "GENERAL"
+  })
+  output$creation_req_micro_origine_ui <- renderUI({
+    if(!identical(creation_req_type_modele(),"MICRO")) return(NULL)
+    wellPanel(
+      h4("Microbiologie — Origine du prélèvement"),
+      p("Choisissez l'origine ou saisissez une origine personnalisée. Le marquage X est facultatif."),
+      selectInput("creation_micro_origine","Origine / site de prélèvement",
+        choices=c("Choisir..."="", "Urine"="Urine", "Sang / hémoculture"="Sang / hémoculture",
+          "Selles"="Selles", "Expectoration / crachats"="Expectoration / crachats",
+          "Gorge"="Gorge", "Nez / nasopharynx"="Nez / nasopharynx",
+          "Plaie"="Plaie", "Peau"="Peau", "Vaginal"="Vaginal",
+          "Urètre"="Urètre", "Liquide céphalorachidien"="LCR",
+          "Autre (saisie manuelle)"="AUTRE")),
+      conditionalPanel("input.creation_micro_origine == 'AUTRE'",
+        textInput("creation_micro_origine_autre","Origine à inscrire manuellement")),
+      checkboxInput("creation_micro_croix","Ajouter une croix (X) à côté de l'origine sur le PDF",value=TRUE),
+      fluidRow(
+        column(6,numericInput("creation_micro_x","Position horizontale X (%)",value=12,min=0,max=95,step=1)),
+        column(6,numericInput("creation_micro_y","Position verticale Y (%)",value=32,min=0,max=95,step=1))
+      ),
+      helpText("Position mesurée depuis le coin supérieur gauche. Vérifiez le PDF avant impression.")
+    )
+  })
+
+  creation_req_filtrer_catalogue <- function(d,type){
+    if(!nrow(d) || identical(type,"GENERAL")) return(d)
+    txt<-toupper(paste(d$mnemonique,d$nom,d$departement))
+    micro<-grepl("MICRO|BACT|CULTUR|HEMOCULT|URINE CULT|ANTIBIO|PARASIT|MYCO|VIRO|PCR|GRAM|FONG|STREP|STAPH",txt)
+    if(identical(type,"MICRO")) return(d[micro,,drop=FALSE])
+    d[!micro,,drop=FALSE]
+  }
   creation_req_tests_recherche_ajoutes <- reactiveVal(integer(0))
 
   output$creation_req_tests_ui <- renderUI({
@@ -14583,15 +14771,21 @@ server <- function(input, output, session) {
       WHERE actif=1
       ORDER BY mnemonique"),error=function(e)data.frame())
 
-    if(nrow(routine)>0)
-      routine <- routine[toupper(routine$mnemonique) %in% tests_routine_mnemo,,drop=FALSE]
+    type_modele<-creation_req_type_modele()
+    if(nrow(routine)>0) {
+      routine<-creation_req_filtrer_catalogue(routine,type_modele)
+      if(!identical(type_modele,"MICRO"))
+        routine <- routine[toupper(routine$mnemonique) %in% tests_routine_mnemo,,drop=FALSE]
+      else routine<-head(routine,50L)
+    }
 
     tagList(
       tags$div(
         style="padding:10px 12px;background:#f5fbfc;border:1px solid #b9dfe2;border-radius:8px;margin-bottom:10px;",
-        strong("Tests de routine"),
+        strong(if(identical(type_modele,"MICRO")) "Analyses de microbiologie"
+               else "Tests de routine — biochimie / hématologie"),
         tags$div(class="text-muted",
-          "Les mnémoniques proviennent directement du dictionnaire d'analyses Vitalité.")
+          "Analyses issues du dictionnaire EDUSILLAB. Les types de prélèvement (sérum/plasma) doivent être vérifiés selon le test.")
       ),
       if(nrow(routine)>0)
         checkboxGroupInput(
@@ -14608,6 +14802,9 @@ server <- function(input, output, session) {
 
       hr(),
       h4("Autres analyses"),
+      p(if(identical(type_modele,"MICRO"))
+          "Réquisition de microbiologie : recherchez les cultures, prélèvements et analyses microbiologiques."
+        else "Réquisition Vitalité/Horizon : recherchez les analyses de biochimie et d'hématologie. Vérifiez sérum/plasma selon le dictionnaire."),
       p(class="text-muted",
         "Recherchez par mnémonique ou par nom dans tout le dictionnaire Vitalité."),
       fluidRow(
@@ -14657,8 +14854,9 @@ server <- function(input, output, session) {
       LIMIT 100",
       params=list(motif,motif)),error=function(e)data.frame())
 
+    d<-creation_req_filtrer_catalogue(d,creation_req_type_modele())
     if(nrow(d)==0)
-      return(div(class="warning-box","Aucune analyse trouvée."))
+      return(div(class="warning-box","Aucune analyse trouvée pour le modèle choisi."))
 
     checkboxGroupInput(
       "creation_req_resultats_selection",
@@ -14855,7 +15053,8 @@ server <- function(input, output, session) {
         cols <- intersect(c("patient_id","etudiant_id","attribue_par","consigne","statut",
           "modele_id","adresse_postale","ville_postale","province_postale","code_postal",
           "pays_postal","commentaire_requisition","commentaire_page","commentaire_x",
-          "commentaire_y","date_prelevement","heure_prelevement","location_prelevement"),
+          "commentaire_y","date_prelevement","heure_prelevement","location_prelevement",
+          "medecin_referent","clinique_referente"),
           names(source))
         for(eid in etudiants) {
           valeurs <- lapply(cols,function(cn) {
@@ -14897,6 +15096,62 @@ server <- function(input, output, session) {
       showNotification(paste("Attribution impossible :",conditionMessage(e)),type="error",duration=15)
       output$creation_req_message <- renderUI(div(class="danger-box",conditionMessage(e)))
     })
+  })
+
+  repertoire_medical_refresh <- reactiveVal(0L)
+  # Mettre à jour les listes sans reconstruire les contrôles Shiny :
+  # les sélections restent disponibles pendant la création.
+  observe({
+    repertoire_medical_refresh()
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    med <- tryCatch(db_query(con,"SELECT id,nom FROM repertoire_medecins WHERE actif=1 ORDER BY nom"),
+      error=function(e){showNotification(paste("Liste des médecins :",conditionMessage(e)),type="error");NULL})
+    cli <- tryCatch(db_query(con,"SELECT id,nom FROM repertoire_cliniques WHERE actif=1 ORDER BY nom"),
+      error=function(e){showNotification(paste("Liste des cliniques :",conditionMessage(e)),type="error");NULL})
+    if(!is.null(med)){
+      choix <- c("Aucun"="",stats::setNames(as.character(med$id),as.character(med$nom)))
+      selection <- isolate(input$creation_req_medecin %||% "")
+      if(!selection %in% unname(choix)) selection <- ""
+      updateSelectizeInput(session,"creation_req_medecin",choices=choix,selected=selection,server=FALSE)
+    }
+    if(!is.null(cli)){
+      choix <- c("Aucune"="",stats::setNames(as.character(cli$id),as.character(cli$nom)))
+      selection <- isolate(input$creation_req_clinique %||% "")
+      if(!selection %in% unname(choix)) selection <- ""
+      updateSelectizeInput(session,"creation_req_clinique",choices=choix,selected=selection,server=FALSE)
+    }
+  })
+  observeEvent(input$creation_ajouter_medecin,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    nom<-trimws(as.character(input$creation_nouveau_medecin %||% ""))
+    if(!nzchar(nom)) return(showNotification("Inscrivez le nom du médecin.",type="warning"))
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    db_execute(con,"INSERT INTO repertoire_medecins(nom) VALUES(?)",params=list(nom))
+    repertoire_medical_refresh(repertoire_medical_refresh()+1L)
+    nouveau <- tryCatch(db_query(con,"SELECT id FROM repertoire_medecins WHERE nom=? ORDER BY id DESC LIMIT 1",params=list(nom)),error=function(e)NULL)
+    if(!is.null(nouveau) && nrow(nouveau)) {
+      choix <- db_query(con,"SELECT id,nom FROM repertoire_medecins WHERE actif=1 ORDER BY nom")
+      updateSelectizeInput(session,"creation_req_medecin",
+        choices=c("Aucun"="",stats::setNames(as.character(choix$id),as.character(choix$nom))),
+        selected=as.character(nouveau$id[1]),server=FALSE)
+    }
+    showNotification("Médecin ajouté au répertoire.",type="message")
+  })
+  observeEvent(input$creation_ajouter_clinique,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    nom<-trimws(as.character(input$creation_nouvelle_clinique %||% ""))
+    if(!nzchar(nom)) return(showNotification("Inscrivez la clinique.",type="warning"))
+    con<-ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    db_execute(con,"INSERT INTO repertoire_cliniques(nom) VALUES(?)",params=list(nom))
+    repertoire_medical_refresh(repertoire_medical_refresh()+1L)
+    nouveau <- tryCatch(db_query(con,"SELECT id FROM repertoire_cliniques WHERE nom=? ORDER BY id DESC LIMIT 1",params=list(nom)),error=function(e)NULL)
+    if(!is.null(nouveau) && nrow(nouveau)) {
+      choix <- db_query(con,"SELECT id,nom FROM repertoire_cliniques WHERE actif=1 ORDER BY nom")
+      updateSelectizeInput(session,"creation_req_clinique",
+        choices=c("Aucun"="",stats::setNames(as.character(choix$id),as.character(choix$nom))),
+        selected=as.character(nouveau$id[1]),server=FALSE)
+    }
+    showNotification("Clinique ajoutée au répertoire.",type="message")
   })
 
   observeEvent(input$creation_req_attribuer,{
@@ -14951,6 +15206,16 @@ server <- function(input, output, session) {
       db_begin_retry(con)
       transaction_ouverte <- TRUE
       exids_crees <- integer(0)
+      med_id <- suppressWarnings(as.integer(input$creation_req_medecin))
+      cli_id <- suppressWarnings(as.integer(input$creation_req_clinique))
+      med_nom <- if(length(med_id)==1L && !is.na(med_id)) {
+        x<-db_query(con,"SELECT nom FROM repertoire_medecins WHERE id=?",params=list(med_id))
+        if(nrow(x)) as.character(x$nom[1]) else ""
+      } else ""
+      cli_nom <- if(length(cli_id)==1L && !is.na(cli_id)) {
+        x<-db_query(con,"SELECT nom FROM repertoire_cliniques WHERE id=?",params=list(cli_id))
+        if(nrow(x)) as.character(x$nom[1]) else ""
+      } else ""
       for (pid in pids) {
       for (eid in eids) {
       db_execute(con,"
@@ -14958,8 +15223,10 @@ server <- function(input, output, session) {
           patient_id,etudiant_id,attribue_par,consigne,statut,modele_id,
           adresse_postale,ville_postale,province_postale,code_postal,pays_postal,
           commentaire_requisition,commentaire_page,commentaire_x,commentaire_y,
-          date_prelevement,heure_prelevement,location_prelevement)
-        VALUES (?,?,?,?, ?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+          date_prelevement,heure_prelevement,location_prelevement,
+          medecin_referent,clinique_referente,
+          micro_origine,micro_origine_marquer,micro_origine_x,micro_origine_y)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params=list(
           pid,eid,utilisateur_connecte()$id,norm_txt(input$creation_req_consigne),
           if(differe) "EN_ATTENTE_ATTRIBUTION" else "A_FAIRE",modele_id,
@@ -14972,7 +15239,16 @@ server <- function(input, output, session) {
           1L,0.12,0.30,
           as.character(input$creation_req_date_prelevement %||% ""),
           norm_txt(input$creation_req_heure_prelevement),
-          norm_txt(input$creation_req_location_prelevement)
+          norm_txt(input$creation_req_location_prelevement),
+          med_nom,cli_nom,
+          if(identical(creation_req_type_modele(),"MICRO")) {
+            if(identical(input$creation_micro_origine,"AUTRE"))
+              norm_txt(input$creation_micro_origine_autre)
+            else norm_txt(input$creation_micro_origine)
+          } else "",
+          as.integer(isTRUE(input$creation_micro_croix)),
+          as.numeric(input$creation_micro_x %||% 12)/100,
+          as.numeric(input$creation_micro_y %||% 32)/100
         ))
       exid <- db_query(con,"SELECT last_insert_rowid() AS id")$id[1]
       if(length(exid)!=1L || is.na(exid)) stop("Impossible de récupérer l’identifiant de la réquisition créée.")
@@ -15319,14 +15595,14 @@ server <- function(input, output, session) {
     magick::image_read(fichiers)
   }
 
-  edusillab_ecrire_pages_pdf <- function(pages, fichier) {
+  edusillab_ecrire_pages_pdf <- function(pages, fichier, densite=150) {
     if (!length(pages)) stop("Aucune page à écrire dans le PDF.")
     infos <- magick::image_info(pages)
     largeur <- as.numeric(infos$width[1]); hauteur <- as.numeric(infos$height[1])
     if (!is.finite(largeur) || !is.finite(hauteur) || largeur<=0 || hauteur<=0)
       stop("Dimensions de page PDF invalides.")
     # Rendu natif : évite la restriction de sécurité ImageMagick PDF.
-    grDevices::pdf(fichier,width=largeur/150,height=hauteur/150,
+    grDevices::pdf(fichier,width=largeur/densite,height=hauteur/densite,
                    paper="special",onefile=TRUE,useDingbats=FALSE)
     on.exit(grDevices::dev.off(),add=TRUE)
     for (i in seq_along(pages)) {
@@ -15340,8 +15616,11 @@ server <- function(input, output, session) {
 
   nom_pdf_patient_requisition <- function(exid, prefixe="REQUISITION") {
     con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
-    d <- db_query(con,"SELECT p.nom,p.prenom FROM requisition_exercices re
-                       JOIN patients p ON p.id=re.patient_id WHERE re.id=?",
+    d <- db_query(con,"SELECT p.nom,p.prenom,
+                       TRIM(COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'')) AS etudiant
+                       FROM requisition_exercices re
+                       JOIN patients p ON p.id=re.patient_id
+                       JOIN utilisateurs u ON u.id=re.etudiant_id WHERE re.id=?",
                   params=list(exid))
     if(!nrow(d)) return(paste0(prefixe,"_",exid,".pdf"))
     nettoyer <- function(x) {
@@ -15349,7 +15628,8 @@ server <- function(input, output, session) {
       x <- gsub("[^A-Za-z0-9_-]+","_",toupper(x))
       gsub("^_+|_+$","",x)
     }
-    paste0(prefixe,"_",nettoyer(d$nom[1]),"_",nettoyer(d$prenom[1]),"_",exid,".pdf")
+    paste0(prefixe,"_ETUDIANT_",nettoyer(d$etudiant[1]),
+           "_PATIENT_",nettoyer(d$nom[1]),"_",nettoyer(d$prenom[1]),"_",exid,".pdf")
   }
 
   output$creation_req_pdf_download <- downloadHandler(
@@ -15367,16 +15647,18 @@ server <- function(input, output, session) {
       con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
       d <- db_query(con,"
         SELECT re.modele_id,rm.fichier_pdf,
-               p.nom,p.prenom,p.medicare,p.numero_dossier,p.date_naissance
+               p.nom,p.prenom,p.medicare,p.numero_dossier,p.date_naissance,
+               TRIM(COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'')) AS nom_etudiant
         FROM requisition_exercices re
         JOIN patients p ON p.id=re.patient_id
+        JOIN utilisateurs u ON u.id=re.etudiant_id
         JOIN requisition_modeles rm ON rm.id=re.modele_id
         WHERE re.id=?",params=list(exid))
       if(nrow(d)!=1 || !file.exists(d$fichier_pdf[1]))
         stop("Le PDF original de cette réquisition est introuvable.")
 
       # Le PDF original est rendu page par page; aucune reconstruction du formulaire.
-      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=150)
+      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=85)
       pos <- creation_req_pdf_positions()
       if(is.null(pos)) {
         z <- valeurs_requisition_pdf(exid)
@@ -15459,7 +15741,18 @@ server <- function(input, output, session) {
           location=paste0("+",xx,"+",yy),gravity="northwest")
       }
 
-      edusillab_ecrire_pages_pdf(pages,file)
+      # Ajouter l'étudiant dès la première génération de la réquisition.
+      nom_etudiant <- if(nrow(d)) trimws(as.character(d$nom_etudiant[1])) else ""
+      if(length(nom_etudiant)==1L && !is.na(nom_etudiant) && nzchar(nom_etudiant)) {
+        for(pg in seq_along(pages)) {
+          pages[pg] <- magick::image_annotate(
+            pages[pg],paste0("Étudiant : ",nom_etudiant),
+            gravity="northeast",location="-18+4",
+            size=max(5L,round(5 * 85 / 72)), # 5 pt à 85 DPI
+            color="#1D3557",boxcolor="#FFFFFFD9")
+        }
+      }
+      edusillab_ecrire_pages_pdf(pages,file,densite=85)
     }
   )
 
@@ -15586,7 +15879,8 @@ server <- function(input, output, session) {
              COALESCE(NULLIF(re.code_postal,''),p.code_postal) AS code_postal_aff,
              COALESCE(NULLIF(re.pays_postal,''),p.pays) AS pays_aff,
              re.commentaire_requisition,re.commentaire_page,re.commentaire_x,re.commentaire_y,
-             re.date_prelevement,re.heure_prelevement,re.location_prelevement
+             re.date_prelevement,re.heure_prelevement,re.location_prelevement,
+             re.medecin_referent,re.clinique_referente
       FROM requisition_exercices re
       JOIN requisition_modeles rm ON rm.id=re.modele_id
       JOIN patients p ON p.id=re.patient_id
@@ -15620,7 +15914,9 @@ server <- function(input, output, session) {
         CODE_POSTAL=d$code_postal_aff[1],PAYS=d$pays_aff[1],
         DATE_PRELEVEMENT=d$date_prelevement[1],
         HEURE_PRELEVEMENT=d$heure_prelevement[1],
-        LOCATION_PRELEVEMENT=d$location_prelevement[1],"")
+        LOCATION_PRELEVEMENT=d$location_prelevement[1],
+        MEDECIN_REFERENT=d$medecin_referent[1],
+        CLINIQUE_REFERENTE=d$clinique_referente[1],"")
       if(length(z)==0 || is.na(z)) "" else as.character(z)
     }
 
@@ -16076,7 +16372,7 @@ setTimeout(async function(){
     }
   )
 
-  edusillab_pdf_exercice <- function(exid,file){
+  edusillab_pdf_exercice <- function(exid,file,densite=100){
       exid <- as.integer(exid)
       if(is.null(exid)) stop("Aucune réquisition sélectionnée.")
       if(!requireNamespace("magick",quietly=TRUE))
@@ -16087,21 +16383,26 @@ setTimeout(async function(){
         SELECT rm.fichier_pdf,p.nom,p.prenom,p.medicare,
                p.numero_dossier,p.date_naissance,
                re.adresse_postale,re.ville_postale,re.province_postale,
-               re.code_postal,re.pays_postal
+               re.code_postal,re.pays_postal,re.complement_pdf,
+               re.micro_origine,re.micro_origine_marquer,
+               re.micro_origine_x,re.micro_origine_y,
+               TRIM(COALESCE(u.prenom,'') || ' ' || COALESCE(u.nom,'')) AS nom_etudiant
         FROM requisition_exercices re
         JOIN patients p ON p.id=re.patient_id
+        JOIN utilisateurs u ON u.id=re.etudiant_id
         JOIN requisition_modeles rm ON rm.id=re.modele_id
         WHERE re.id=?",params=list(exid))
       if(nrow(d)!=1 || !file.exists(d$fichier_pdf[1]))
         stop("PDF original introuvable.")
 
       # IMPORTANT: le formulaire original reste le fond du document.
-      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=150)
+      pages <- edusillab_lire_pages_pdf(d$fichier_pdf[1],densite=densite)
 
       # Renseignements du patient : appliqués à TOUS les modèles de réquisition.
       modele_info <- db_query(con,"
         SELECT re.modele_id,re.adresse_postale,re.ville_postale,
                re.province_postale,re.code_postal,re.pays_postal,
+               re.medecin_referent,re.clinique_referente,
                p.nom,p.prenom,p.medicare,p.numero_dossier,
                p.date_naissance,p.sexe,p.adresse,p.ville,p.province,
                p.code_postal AS patient_code_postal,p.pays
@@ -16109,6 +16410,7 @@ setTimeout(async function(){
         JOIN patients p ON p.id=re.patient_id
         WHERE re.id=?",params=list(exid))
 
+      try(initialiser_champs_patient_modele(modele_info$modele_id[1]),silent=TRUE)
       champs <- db_query(con,"
         SELECT champ,page,x,y,taille
         FROM requisition_modele_champs
@@ -16151,6 +16453,8 @@ setTimeout(async function(){
             if(!nzchar(z)) z <- propre(modele_info$pays)
             z
           },
+          MEDECIN_REFERENT=propre(modele_info$medecin_referent),
+          CLINIQUE_REFERENTE=propre(modele_info$clinique_referente),
           ""
         )
       }
@@ -16207,7 +16511,49 @@ setTimeout(async function(){
         }
       }
 
-      edusillab_ecrire_pages_pdf(pages,file)
+      # Origine microbiologique : texte libre ou choix dans la liste, croix facultative.
+      # Une seule annotation sur la première page, position ajustable à la création.
+      origine <- as.character(d$micro_origine[1])
+      if(length(origine)==1L && !is.na(origine) && nzchar(trimws(origine)) && length(pages)) {
+        info <- magick::image_info(pages[1])
+        coord <- function(v,def){
+          v<-suppressWarnings(as.numeric(v[1]));if(!is.finite(v)) def else max(0,min(.95,v))
+        }
+        xx <- round(coord(d$micro_origine_x,.12)*info$width[1])
+        yy <- round(coord(d$micro_origine_y,.32)*info$height[1])
+        prefixe <- if(isTRUE(as.integer(d$micro_origine_marquer[1])==1L)) "X  " else ""
+        pages[1] <- magick::image_annotate(pages[1],
+          paste0(prefixe,"Origine : ",origine),
+          gravity="northwest",location=paste0("+",xx,"+",yy),
+          size=max(8L,round(10*densite/72)),color="black",
+          boxcolor="#FFFFFFE6")
+      }
+
+      # Mention pédagogique discrète en haut à droite de chaque page.
+      # Ne touche ni au formulaire d'origine ni aux réponses de l'étudiant.
+      nom_etudiant <- trimws(as.character(d$nom_etudiant[1]))
+      if(!is.na(nom_etudiant) && nzchar(nom_etudiant)) {
+        for (pg in seq_along(pages)) {
+          info <- magick::image_info(pages[pg])
+          pages[pg] <- magick::image_annotate(
+            pages[pg], paste0("Étudiant : ",nom_etudiant),
+            gravity="northeast", location="-18+4",
+            size=max(5L,round(5 * densite / 72)), # 5 points
+            color="#1D3557", boxcolor="#FFFFFFD9")
+        }
+      }
+      # Complément administratif modifiable après attribution ou approbation.
+      # Le complément reste distinct des réponses de l'étudiant.
+      complement <- as.character(d$complement_pdf[1])
+      if(length(complement)==1L && !is.na(complement) && nzchar(trimws(complement))) {
+        for(pg in seq_along(pages)) {
+          pages[pg] <- magick::image_annotate(pages[pg],
+            paste0("Complément de réquisition : ",complement),
+            gravity="southwest",location="+18+16",size=15,
+            color="#1D3557",boxcolor="#FFFFFFE6")
+        }
+      }
+      edusillab_ecrire_pages_pdf(pages,file,densite=densite)
   }
 
   output$creation_pdf_download <- downloadHandler(
@@ -16289,6 +16635,14 @@ setTimeout(async function(){
       }
     )
 
+    # Uniformiser les noms de colonnes renvoyés par Neon/PostgreSQL.
+    colonnes <- c(id="ID",dossier="Dossier",patient="Patient",
+                  "étudiant"="Étudiant",tests="Tests",statut="Statut",
+                  attribution="Attribution")
+    for (nm in names(d)) {
+      cible <- colonnes[[tolower(nm)]]
+      if (!is.null(cible)) names(d)[names(d)==nm] <- cible
+    }
     if ("ID" %in% names(d)) {
       d[["Ajouter étudiants"]] <- sprintf(
         "<button type='button' class='btn btn-info btn-xs' onclick=\\\"Shiny.setInputValue('req_exercice_ajouter_etudiants',%s,{priority:'event'})\\\">Ajouter étudiants</button>",
@@ -16350,7 +16704,8 @@ setTimeout(async function(){
       et_valides <- db_query(con,"SELECT id FROM utilisateurs WHERE actif=1 AND UPPER(role)='ETUDIANT'")$id
       if(any(!eids %in% et_valides)) stop("Un étudiant sélectionné n'est pas actif.")
       # Ne jamais écraser le travail d'un étudiant déjà inscrit à cet exercice.
-      colonnes <- intersect(c("patient_id","requisition_id","consigne","modele_id","adresse_postale","ville_postale","province_postale","code_postal","pays_postal","commentaire_requisition","commentaire_page","commentaire_x","commentaire_y","date_prelevement","heure_prelevement","location_prelevement"),names(src))
+      colonnes <- intersect(c("patient_id","requisition_id","consigne","modele_id","adresse_postale","ville_postale","province_postale","code_postal","pays_postal","commentaire_requisition","commentaire_page","commentaire_x","commentaire_y","date_prelevement","heure_prelevement","location_prelevement",
+      "medecin_referent","clinique_referente"),names(src))
       nouveaux <- integer()
       for(eid in eids) {
         # Les copies peuvent partager le patient : une attribution est unique
@@ -16433,8 +16788,12 @@ setTimeout(async function(){
         column(3, actionButton("req_ped_deselectionner", "Désélectionner")),
         column(6, strong(textOutput("req_ped_compteur", inline=TRUE)))
       ),
-      tags$p("Pour corriger : sélectionnez une seule ligne. Pour créer un ZIP : sélectionnez plusieurs lignes."),
+      tags$p("Pour corriger : sélectionnez une seule ligne. Pour créer un ZIP : choisissez au maximum 2 réquisitions par téléchargement afin de préserver les performances du serveur."),
       downloadButton("req_ped_zip","Télécharger les réquisitions sélectionnées (ZIP)",class="btn-success"),
+      tags$hr(),
+      h4("Modifier une réquisition attribuée ou approuvée"),
+      p("Sélectionnez UNE réquisition dans la liste ci-dessus. Le complément sera enregistré et visible sur le PDF régénéré, sans supprimer les réponses de l'étudiant."),
+      uiOutput("req_ped_complement_ui"),
       tags$hr(),
       uiOutput("req_ped_globale_ui"),
       h4("Correction pédagogique détaillée, par code d’analyse"),
@@ -16495,7 +16854,8 @@ setTimeout(async function(){
   }, ignoreInit=FALSE)
   observeEvent(input$req_ped_tout_selectionner, {
     d <- req_ped_filtres()
-    updateSelectizeInput(session,"req_ped_ids_explicites",selected=as.character(d$ID))
+    updateSelectizeInput(session,"req_ped_ids_explicites",selected=as.character(head(d$ID,2L)))
+    showNotification("Les 5 premières réquisitions filtrées sont sélectionnées pour préserver la stabilité du serveur.",type="message")
   })
   observeEvent(input$req_ped_deselectionner, {
     updateSelectizeInput(session,"req_ped_ids_explicites",selected=character())
@@ -16521,26 +16881,332 @@ setTimeout(async function(){
   output$req_ped_compteur <- renderText({
     paste(length(req_ped_ids()), "réquisition(s) sélectionnée(s)")
   })
-  output$req_ped_zip <- downloadHandler(
+  output$req_ped_complement_ui <- renderUI({
+    ids <- req_ped_ids()
+    if(length(ids)!=1L) return(helpText("Sélectionnez une seule réquisition pour la modifier."))
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"SELECT complement_pdf,statut,modele_id,
+        medecin_referent,clinique_referente,heure_prelevement FROM requisition_exercices WHERE id=?",
+      params=list(ids[1]))
+    if(!nrow(d)) return(NULL)
+    valeur <- as.character(d$complement_pdf[1]);if(is.na(valeur)) valeur <- ""
+    med <- db_query(con,"SELECT nom FROM repertoire_medecins WHERE actif=1 ORDER BY nom")
+    cli <- db_query(con,"SELECT nom FROM repertoire_cliniques WHERE actif=1 ORDER BY nom")
+    med_actuel <- as.character(d$medecin_referent[1]);if(is.na(med_actuel)) med_actuel <- ""
+    cli_actuel <- as.character(d$clinique_referente[1]);if(is.na(cli_actuel)) cli_actuel <- ""
+    med_choix <- c("Aucun"="",stats::setNames(as.character(med$nom),as.character(med$nom)))
+    cli_choix <- c("Aucune"="",stats::setNames(as.character(cli$nom),as.character(cli$nom)))
+    if(nzchar(med_actuel) && !med_actuel %in% unname(med_choix)) med_choix <- c(med_choix,stats::setNames(med_actuel,paste0(med_actuel," (déjà enregistré)")))
+    if(nzchar(cli_actuel) && !cli_actuel %in% unname(cli_choix)) cli_choix <- c(cli_choix,stats::setNames(cli_actuel,paste0(cli_actuel," (déjà enregistré)")))
+    tagList(p(paste("Réquisition",ids[1],"— statut :",d$statut[1])),
+      textAreaInput("req_ped_complement_texte","Informations à ajouter sur le PDF",
+        value=valeur,rows=3,placeholder="Ex. Prélèvement à jeun, précisions du médecin, notes administratives..."),
+      fluidRow(
+        column(6,
+          radioButtons("req_ped_medecin_mode","Médecin prescripteur : mode de saisie",
+            choices=c("Choisir dans la liste"="liste","Saisir manuellement"="manuel"),
+            selected=if(nzchar(med_actuel) && !med_actuel %in% unname(med_choix)) "manuel" else "liste",inline=TRUE),
+          conditionalPanel("input.req_ped_medecin_mode == 'liste'",
+            selectizeInput("req_ped_medecin_modifier","Médecin du répertoire",
+              choices=med_choix,selected=med_actuel,
+              options=list(create=FALSE,placeholder="Choisir dans le répertoire"))),
+          conditionalPanel("input.req_ped_medecin_mode == 'manuel'",
+            textInput("req_ped_medecin_manuel","Nom du médecin (saisie libre)",value=med_actuel,
+              placeholder="Dr Nom Prénom"))
+        ),
+        column(6,
+          radioButtons("req_ped_clinique_mode","Clinique / location : mode de saisie",
+            choices=c("Choisir dans la liste"="liste","Saisir manuellement"="manuel"),
+            selected=if(nzchar(cli_actuel) && !cli_actuel %in% unname(cli_choix)) "manuel" else "liste",inline=TRUE),
+          conditionalPanel("input.req_ped_clinique_mode == 'liste'",
+            selectizeInput("req_ped_clinique_modifier","Clinique du répertoire",
+              choices=cli_choix,selected=cli_actuel,
+              options=list(create=FALSE,placeholder="Choisir dans le répertoire"))),
+          conditionalPanel("input.req_ped_clinique_mode == 'manuel'",
+            textInput("req_ped_clinique_manuel","Clinique / location (saisie libre)",value=cli_actuel,
+              placeholder="Nom de la clinique ou du lieu"))
+        )
+      ),
+      textInput("req_ped_heure_modifier","Heure de prélèvement (HH:MM)",
+        value=ifelse(is.na(d$heure_prelevement[1]),"",as.character(d$heure_prelevement[1])),
+        placeholder="Ex. 08:30"),
+      h5("Placer le médecin et la clinique sur le modèle PDF"),
+      p(class="text-muted","Les positions ci-dessous sont partagées par toutes les réquisitions utilisant le même modèle. X et Y sont des pourcentages de la page."),
+      uiOutput("req_ped_positions_medicales_ui"),
+      actionButton("req_ped_enregistrer_complement","Enregistrer les renseignements",class="btn-primary"),
+      actionButton("req_ped_apercu","1. Prévisualiser le PDF",class="btn-info"),
+      actionButton("req_ped_valider_pdf","2. Valider le PDF",class="btn-primary"),
+      downloadButton("req_ped_pdf_modifie","3. Télécharger le PDF validé",class="btn-success"),
+      textOutput("req_ped_etat_validation")
+    )
+  })
+  observeEvent(input$req_ped_enregistrer_complement,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    ids <- req_ped_ids();req(length(ids)==1L)
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tryCatch({
+      heure <- trimws(as.character(input$req_ped_heure_modifier %||% ""))
+      if(nzchar(heure) && !grepl("^([01][0-9]|2[0-3]):[0-5][0-9]$",heure))
+        stop("Heure invalide : utilisez HH:MM (ex. 08:30).")
+      medecin <- if(identical(input$req_ped_medecin_mode,"manuel"))
+        trimws(as.character(input$req_ped_medecin_manuel %||% "")) else
+        trimws(as.character(input$req_ped_medecin_modifier %||% ""))
+      clinique <- if(identical(input$req_ped_clinique_mode,"manuel"))
+        trimws(as.character(input$req_ped_clinique_manuel %||% "")) else
+        trimws(as.character(input$req_ped_clinique_modifier %||% ""))
+      db_execute(con,"UPDATE requisition_exercices
+        SET complement_pdf=?,medecin_referent=?,clinique_referente=?,heure_prelevement=? WHERE id=?",
+        params=list(as.character(input$req_ped_complement_texte %||% ""),
+          medecin,clinique,heure,ids[1]))
+      refresh_exercices_requisition(refresh_exercices_requisition()+1L)
+      showNotification("Complément enregistré. Il apparaîtra sur le prochain PDF généré.",type="message")
+    },error=function(e)showNotification(conditionMessage(e),type="error",duration=12))
+  })
+
+  output$req_ped_positions_medicales_ui <- renderUI({
+    ids <- req_ped_ids()
+    if(length(ids)!=1L) return(NULL)
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"SELECT modele_id FROM requisition_exercices WHERE id=?",
+      params=list(ids[1]))
+    if(!nrow(d)) return(NULL)
+    positions <- db_query(con,"SELECT champ,page,x,y,taille
+      FROM requisition_modele_champs
+      WHERE modele_id=? AND champ IN ('MEDECIN_REFERENT','CLINIQUE_REFERENTE')",
+      params=list(d$modele_id[1]))
+    tagList(lapply(c("MEDECIN_REFERENT","CLINIQUE_REFERENTE"),function(ch){
+      z <- positions[positions$champ==ch,,drop=FALSE]
+      prefix <- if(ch=="MEDECIN_REFERENT") "req_pos_med" else "req_pos_cli"
+      lib <- if(ch=="MEDECIN_REFERENT") "Médecin" else "Clinique / location"
+      val <- function(col,def) if(nrow(z) && !is.na(z[[col]][1]))
+        as.numeric(z[[col]][1]) else def
+      fluidRow(
+        column(3,strong(lib)),
+        column(2,numericInput(paste0(prefix,"_page"),"Page",val("page",1),min=1)),
+        column(2,numericInput(paste0(prefix,"_x"),"X (%)",100*val("x",.18),min=0,max=100,step=.5)),
+        column(2,numericInput(paste0(prefix,"_y"),"Y (%)",100*val("y",.31),min=0,max=100,step=.5)),
+        column(2,numericInput(paste0(prefix,"_taille"),"Taille",val("taille",11),min=6,max=30))
+      )
+    }),
+    actionButton("req_ped_sauver_positions","Enregistrer les positions sur le modèle PDF",class="btn-info"))
+  })
+  observeEvent(input$req_ped_sauver_positions,{
+    req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
+    ids <- req_ped_ids();req(length(ids)==1L)
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tryCatch({
+      d <- db_query(con,"SELECT modele_id FROM requisition_exercices WHERE id=?",
+        params=list(ids[1]))
+      req(nrow(d)==1L)
+      for(ch in c("MEDECIN_REFERENT","CLINIQUE_REFERENTE")){
+        prefix <- if(ch=="MEDECIN_REFERENT") "req_pos_med" else "req_pos_cli"
+        page <- as.integer(input[[paste0(prefix,"_page")]])
+        x <- as.numeric(input[[paste0(prefix,"_x")]])/100
+        y <- as.numeric(input[[paste0(prefix,"_y")]])/100
+        taille <- as.integer(input[[paste0(prefix,"_taille")]])
+        if(any(!is.finite(c(page,x,y,taille))) ||
+           page<1 || x<0 || x>1 || y<0 || y>1 || taille<6 || taille>30)
+          stop(paste("Position invalide :",ch))
+        existe <- db_query(con,"SELECT id FROM requisition_modele_champs
+          WHERE modele_id=? AND champ=?",params=list(d$modele_id[1],ch))
+        if(nrow(existe)) {
+          db_execute(con,"UPDATE requisition_modele_champs
+            SET page=?,x=?,y=?,taille=? WHERE id=?",
+            params=list(page,x,y,taille,existe$id[1]))
+        } else {
+          db_execute(con,"INSERT INTO requisition_modele_champs
+            (modele_id,champ,page,x,y,taille) VALUES (?,?,?,?,?,?)",
+            params=list(d$modele_id[1],ch,page,x,y,taille))
+        }
+      }
+      showNotification("Positions enregistrées. Générez le PDF final pour vérifier.",type="message")
+    },error=function(e)showNotification(conditionMessage(e),type="error",duration=12))
+  })
+  # Validation explicite : toute modification invalide le précédent aperçu.
+  req_pdf_dossier <- tempfile("edusillab_validation_")
+  dir.create(req_pdf_dossier,recursive=TRUE,showWarnings=FALSE)
+  session$onSessionEnded(function() unlink(req_pdf_dossier,recursive=TRUE,force=TRUE))
+  req_pdf_revision <- reactiveVal(0L)
+  req_pdf_validation <- reactiveVal(NULL)
+  req_pdf_apercu <- reactiveVal(NULL)
+  observeEvent(input$req_ped_enregistrer_complement,{
+    req_pdf_revision(req_pdf_revision()+1L)
+    req_pdf_validation(NULL)
+    req_pdf_apercu(NULL)
+  },ignoreInit=TRUE)
+  observeEvent(input$req_ped_sauver_positions,{
+    req_pdf_revision(req_pdf_revision()+1L)
+    req_pdf_validation(NULL)
+    req_pdf_apercu(NULL)
+  },ignoreInit=TRUE)
+  output$req_ped_etat_validation <- renderText({
+    ids<-req_ped_ids()
+    val<-req_pdf_validation()
+    if(length(ids)!=1L) return("")
+    if(!is.null(val) && identical(val$id,ids[1]) &&
+       identical(val$revision,req_pdf_revision()))
+      return("PDF validé : téléchargement autorisé.")
+    "PDF non validé. Enregistrez les informations, vérifiez l'aperçu, puis validez."
+  })
+  observeEvent(input$req_ped_apercu,{
+    ids<-req_ped_ids()
+    if(length(ids)!=1L) return(showNotification("Sélectionnez une seule réquisition.",type="warning"))
+    req_pdf_validation(NULL)
+    req_pdf_apercu(NULL)
+    tryCatch({
+      # Générer à basse résolution pour ne pas saturer le serveur.
+      fichier<-file.path(req_pdf_dossier,paste0("apercu_",ids[1],".pdf"))
+      if(file.exists(fichier)) unlink(fichier)
+      edusillab_pdf_exercice(ids[1],fichier,densite=75)
+      if(!file.exists(fichier) || file.info(fichier)$size<100)
+        stop("Le PDF de prévisualisation est vide.")
+      if(!requireNamespace("pdftools",quietly=TRUE))
+        stop("Le package pdftools est requis pour l'aperçu.")
+      png<-file.path(req_pdf_dossier,paste0("apercu_",ids[1],".png"))
+      pdftools::pdf_convert(fichier,format="png",dpi=90,
+        pages=1,filenames=png,verbose=FALSE)
+      invisible(gc(verbose=FALSE))
+      req_pdf_apercu(list(id=ids[1],revision=req_pdf_revision(),
+                            pdf=fichier,image=png))
+      showModal(modalDialog(
+        title=paste("Aperçu — Réquisition",ids[1]),
+        p("Vérifiez les emplacements du médecin et de la clinique. L'aperçu présente la première page."),
+        imageOutput("req_ped_apercu_image",width="100%",height="auto"),
+        footer=tagList(modalButton("Fermer pour corriger"),
+          actionButton("req_ped_valider_apercu","Valider cet aperçu",class="btn-success")),
+        size="l",easyClose=TRUE))
+    },error=function(e)showNotification(paste("Aperçu impossible :",conditionMessage(e)),
+                                       type="error",duration=12))
+  })
+  output$req_ped_apercu_image<-renderImage({
+    a<-req(req_pdf_apercu())
+    req(file.exists(a$image))
+    list(src=a$image,contentType="image/png",width="100%",alt="Aperçu de la réquisition")
+  },deleteFile=FALSE)
+  valider_apercu<-function(){
+    ids<-req_ped_ids();a<-req_pdf_apercu()
+    if(length(ids)!=1L || is.null(a) ||
+       !identical(a$id,ids[1]) ||
+       !identical(a$revision,req_pdf_revision()) ||
+       !file.exists(a$pdf)) {
+      showNotification("Prévisualisez à nouveau la réquisition avant de valider.",
+                       type="warning")
+      return(invisible(NULL))
+    }
+    req_pdf_validation(list(id=ids[1],revision=req_pdf_revision(),pdf=a$pdf))
+    removeModal()
+    showNotification("PDF validé. Vous pouvez le télécharger.",type="message")
+  }
+  observeEvent(input$req_ped_valider_apercu,{valider_apercu()})
+  observeEvent(input$req_ped_valider_pdf,{valider_apercu()})
+  output$req_ped_pdf_modifie <- downloadHandler(
+    filename=function(){
+      ids <- req_ped_ids()
+      if(length(ids)!=1L) return("requisition_modifiee.pdf")
+      paste0("requisition_modifiee_",ids[1],".pdf")
+    },
+    contentType="application/pdf",
+    content=function(file){
+      ids <- req_ped_ids();req(length(ids)==1L)
+      val <- req_pdf_validation()
+      if(is.null(val) || !identical(val$id,ids[1]) ||
+         !identical(val$revision,req_pdf_revision()) ||
+         !file.exists(val$pdf))
+        stop("Vous devez prévisualiser et valider le PDF avant de le télécharger.")
+      # Aucun nouveau rendu lors du téléchargement : le PDF déjà validé est copié.
+      ok <- tryCatch(file.copy(val$pdf,file,overwrite=TRUE),error=function(e) FALSE)
+      if(!isTRUE(ok) || !file.exists(file) || is.na(file.info(file)$size) || file.info(file)$size<100)
+        stop("Le PDF validé n'a pas pu être copié. Relancez l'aperçu et vérifiez les journaux Posit.")
+    }
+  )
+
+  # Sécurité ressources : un seul export ZIP lourd par processus Shiny.
+  # Les autres sessions restent disponibles pour les opérations ordinaires.
+  if (!exists("edusillab_zip_occupe", envir=.GlobalEnv, inherits=FALSE)) {
+    assign("edusillab_zip_occupe", FALSE, envir=.GlobalEnv)
+  }
+  edusillab_zip_max <- 2L
+  observeEvent(input$req_ped_tout_selectionner, {
+    if (length(req_ped_ids()) > edusillab_zip_max)
+      showNotification(paste0("ZIP : maximum ",edusillab_zip_max,
+        " réquisitions par téléchargement. Sélectionnez un lot plus petit."),
+        type="warning",duration=10)
+  })
+    output$req_ped_zip <- downloadHandler(
     filename=function() paste0("EDUSILLAB_requisitions_",format(Sys.Date(),"%Y%m%d"),".zip"),
     contentType="application/zip",
     content=function(file){
       req(toupper(utilisateur_connecte()$role) %in% c("ADMIN","SUPERUTILISATEUR"))
       ids <- unique(req_ped_ids())
-      if(!length(ids)) stop("Sélectionnez au moins une réquisition dans le tableau.")
-      dossier <- tempfile("edusillab_zip_");dir.create(dossier)
+      if (!length(ids)) stop("Sélectionnez au moins une réquisition.")
+      if (length(ids)>edusillab_zip_max) stop(paste0("Maximum ",edusillab_zip_max," réquisitions par ZIP."))
+      dossier <- tempfile("edusillab_export_"); dir.create(dossier,recursive=TRUE)
       on.exit(unlink(dossier,recursive=TRUE,force=TRUE),add=TRUE)
-      fichiers <- character()
-      for(id in ids){
-        cible <- file.path(dossier,paste0("requisition_",id,".pdf"))
-        tryCatch({
-          edusillab_pdf_exercice(id,cible)
-          if(file.exists(cible) && file.info(cible)$size>0) fichiers <- c(fichiers,cible)
-        },error=function(e) message("PDF requisition ",id," : ",conditionMessage(e)))
+      fichiers <- character(); erreurs <- character()
+      # Noms des étudiants associés aux réquisitions sélectionnées.
+      # Conserver le numéro de réquisition pour éviter les collisions de noms.
+      con_zip <- ouvrir_db()
+      infos_zip <- tryCatch({
+        db_query(con_zip,paste0("SELECT re.id AS exercice_id, u.prenom AS prenom_etudiant,
+          u.nom AS nom_etudiant FROM requisition_exercices re
+          LEFT JOIN utilisateurs u ON u.id=re.etudiant_id
+          WHERE re.id IN (",paste(rep("?",length(ids)),collapse=","),")"),
+          params=as.list(as.integer(ids)))
+      },finally={DBI::dbDisconnect(con_zip)})
+      names(infos_zip) <- tolower(names(infos_zip))
+      nom_fichier_sur <- function(x){
+        x <- trimws(as.character(x))
+        x[is.na(x)] <- ""
+        x <- iconv(x,from="",to="ASCII//TRANSLIT",sub="")
+        x[is.na(x)] <- ""
+        x <- gsub("[^A-Za-z0-9_-]+","_",x)
+        gsub("^_+|_+$","",x)
       }
-      if(!length(fichiers)) stop("Aucun PDF généré. Vérifiez les modèles PDF et le package magick.")
-      if(!requireNamespace("zip",quietly=TRUE)) stop("Installez le package zip : install.packages('zip')")
-      zip::zipr(zipfile=file,files=basename(fichiers),root=dossier)
+      # Évite qu'une exception PDF annule le téléchargement entier.
+      # Une archive contenant le diagnostic reste téléchargeable.
+      if (!requireNamespace("magick",quietly=TRUE)) {
+        erreurs <- c(erreurs,"Package R 'magick' absent : les PDF ne peuvent pas être générés.")
+      } else {
+        for (id in ids) {
+          et <- infos_zip[as.character(infos_zip$exercice_id)==as.character(id),,drop=FALSE]
+          prenom <- if(nrow(et)) nom_fichier_sur(et$prenom_etudiant[1]) else ""
+          nom <- if(nrow(et)) nom_fichier_sur(et$nom_etudiant[1]) else ""
+          etudiant <- paste(c(prenom,nom)[nzchar(c(prenom,nom))],collapse="_")
+          if(!nzchar(etudiant)) etudiant <- "Etudiant_inconnu"
+          cible <- file.path(dossier,sprintf("%s_requisition_%s.pdf",etudiant,id))
+          err <- tryCatch({
+            edusillab_pdf_exercice(id,cible)
+            if (!file.exists(cible) || is.na(file.info(cible)$size) || file.info(cible)$size<100)
+              stop("PDF vide ou introuvable")
+            NULL
+          },error=function(e) conditionMessage(e))
+          if (is.null(err)) fichiers <- c(fichiers,basename(cible))
+          else {
+            erreurs <- c(erreurs,paste0("Réquisition ",id," : ",err))
+            message("EDUSILLAB ZIP PDF : ",tail(erreurs,1L))
+          }
+          invisible(gc(verbose=FALSE))
+        }
+      }
+      if (length(erreurs) || !length(fichiers)) {
+        rapport <- file.path(dossier,"RAPPORT_EXPORT.txt")
+        writeLines(c("EDUSILLAB — Rapport du téléchargement ZIP",
+          paste("Date :",format(Sys.time(),"%Y-%m-%d %H:%M:%S")),
+          paste("PDF générés :",length(fichiers),"sur",length(ids)),
+          if(!length(fichiers)) "AUCUN PDF GÉNÉRÉ — voir les erreurs ci-dessous.",
+          erreurs),rapport,useBytes=TRUE)
+        fichiers <- c(fichiers,basename(rapport))
+      }
+      # Toujours produire une archive dans un fichier .zip temporaire,
+      # puis la copier vers le chemin de téléchargement imposé par Shiny.
+      archive <- file.path(dossier,"export_requisitions.zip")
+      if (!requireNamespace("zip",quietly=TRUE))
+        stop("Package R 'zip' absent. Installer avec install.packages('zip').")
+      zip::zipr(zipfile=archive,files=fichiers,root=dossier,compression_level=1)
+      if (!file.exists(archive) || is.na(file.info(archive)$size) || file.info(archive)$size<22)
+        stop("Le fichier ZIP n'a pas pu être créé.")
+      if (!file.copy(archive,file,overwrite=TRUE))
+        stop("Le ZIP a été créé, mais n'a pas pu être transmis au navigateur.")
     }
   )
   # Evaluation de la réquisition entière, sans modifier le travail original.
@@ -20111,6 +20777,95 @@ setTimeout(async function(){
   # La réimpression conserve le même numéro d'échantillon et le
   # même BC#. Aucun nouveau code-barres n'est créé.
 
+  # Réimpression groupée : plusieurs patients, un seul PDF et une seule réservation
+  # de cases sur la planche partagée. Aucun nouveau spécimen n'est créé.
+  # Compteur persistant par code-barres : une génération de PDF de
+  # réimpression réussie = une réimpression comptabilisée.
+  initialiser_suivi_reimpressions <- function(con) {
+    db_execute(con,"CREATE TABLE IF NOT EXISTS etiquettes_reimpressions (
+      code_barre TEXT PRIMARY KEY,
+      nombre_reimpressions INTEGER NOT NULL DEFAULT 0,
+      derniere_reimpression TEXT,
+      dernier_utilisateur_id BIGINT)")
+  }
+  enregistrer_reimpressions <- function(con, etiquettes, uid) {
+    initialiser_suivi_reimpressions(con)
+    codes <- as.character(etiquettes$code_barre)
+    codes <- codes[!is.na(codes) & nzchar(trimws(codes))]
+    for(code in unique(codes)) {
+      db_execute(con,"INSERT INTO etiquettes_reimpressions
+        (code_barre,nombre_reimpressions,derniere_reimpression,dernier_utilisateur_id)
+        VALUES (?,1,CURRENT_TIMESTAMP,?)
+        ON CONFLICT(code_barre) DO UPDATE SET
+        nombre_reimpressions=etiquettes_reimpressions.nombre_reimpressions+1,
+        derniere_reimpression=CURRENT_TIMESTAMP,
+        dernier_utilisateur_id=excluded.dernier_utilisateur_id",
+        params=list(code,as.integer(uid)))
+    }
+    invisible(length(unique(codes)))
+  }
+  observeEvent(input$ouvrir_reimpression_groupee, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"
+      SELECT DISTINCT r.id, r.numero_requisition, p.nom, p.prenom, p.numero_dossier
+      FROM requisitions r JOIN specimens s ON s.requisition_id=r.id
+      JOIN patients p ON p.id=r.patient_id
+      ORDER BY r.id DESC LIMIT 3000")
+    choix <- setNames(as.character(d$id),
+      paste0("REQ ",d$numero_requisition," | ",d$prenom," ",d$nom,
+             " | DOSSIER ",d$numero_dossier))
+    showModal(modalDialog(
+      title="Réimprimer plusieurs patients sur une seule planche",
+      p("Sélectionnez plusieurs réquisitions. Les étiquettes existantes sont regroupées dans un seul PDF et occupent les prochaines cases libres de la planche partagée."),
+      p(strong("Suivi : "), "le nombre de réimpressions de chaque code-barres est conservé et mis à jour après génération réussie du PDF."),
+      selectizeInput("reimp_groupe_ids","Réquisitions / patients",
+        choices=choix,multiple=TRUE,
+        options=list(plugins=list("remove_button"),placeholder="Rechercher et ajouter plusieurs patients")),
+      actionButton("reimp_groupe_generer","Générer la planche groupée",class="btn-primary"),
+      uiOutput("apercu_reimpression_selection"),
+      size="l",easyClose=TRUE,footer=modalButton("Fermer")))
+  })
+  observeEvent(input$reimp_groupe_generer, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    ids <- unique(suppressWarnings(as.integer(input$reimp_groupe_ids %||% character())))
+    ids <- ids[!is.na(ids)]
+    if(!length(ids)) return(showNotification("Sélectionnez au moins un patient.",type="warning"))
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    placeholders <- paste(rep("?",length(ids)),collapse=",")
+    # Un seul appel SQL, puis un seul PDF et une seule réservation de positions.
+    labels <- db_query(con,paste0("
+      SELECT r.numero_requisition,s.numero_specimen,s.code_barre,p.nom,p.prenom,
+        p.numero_dossier,p.medicare,p.sexe,
+        COALESCE(s.location,'') AS location,
+        COALESCE(s.analyses,'') AS analyses,
+        COALESCE(s.quantite,'N/P') AS quantite,
+        COALESCE(s.contenant,'NON PRECISE') AS contenant,
+        COALESCE(s.departement,'') AS departement,
+        COALESCE(s.px,'') AS px,
+        TRIM(COALESCE(uc.prenom,'') || ' ' || COALESCE(uc.nom,'')) AS saisi_nom_complet,
+        COALESCE(s.date_creation,'') AS date_saisie,
+        COALESCE(NULLIF(s.saisi_initiales,''),uc.initiales,'') AS signature_initiales
+      FROM specimens s JOIN requisitions r ON r.id=s.requisition_id
+      JOIN patients p ON p.id=s.patient_id
+      LEFT JOIN utilisateurs uc ON uc.id=s.cree_par
+      WHERE r.id IN (",placeholders,")
+      ORDER BY p.nom,p.prenom,r.id,s.groupe_etiquette,s.id"),params=as.list(ids))
+    if(!nrow(labels)) return(showNotification("Aucune étiquette existante.",type="warning"))
+    f <- file.path(preview_dir,paste0("reimpression_groupee_",as.integer(utilisateur_connecte()$id),
+       "_",format(Sys.time(),"%Y%m%d_%H%M%OS6"),".pdf"))
+    tryCatch({
+      creer_pdf_partage_ou_individuel(labels,f,con,utilisateur_connecte()$id)
+      enregistrer_reimpressions(con,labels,utilisateur_connecte()$id)
+      dernier_pdf_reimpression(f)
+      showNotification(paste(nrow(labels),"étiquettes regroupées dans un PDF. Imprimez une seule fois."),
+        type="message",duration=10)
+    },error=function(e) showNotification(
+      paste("Planche non générée :",conditionMessage(e),
+        "Réduisez la sélection si les cases restantes sont insuffisantes."),
+      type="error",duration=NULL))
+  })
+
   observeEvent(input$reimprimer_requisition_id, {
     req(utilisateur_connecte()$perm_historique == 1)
 
@@ -20206,6 +20961,18 @@ setTimeout(async function(){
     dernieres_etiquettes(etiquettes)
     etiquettes_selectionnees(seq_len(nrow(etiquettes)))
 
+    initialiser_suivi_reimpressions(con)
+    compteurs <- db_query(con,"SELECT code_barre,nombre_reimpressions FROM etiquettes_reimpressions")
+    # Un code-barres jamais réimprimé n'existe pas dans la table de suivi.
+    # match() renvoie NA au lieu de provoquer « subscript out of bounds ».
+    positions_compteur <- match(as.character(etiquettes$code_barre),
+                                as.character(compteurs$code_barre))
+    etiquettes$nombre_reimpressions <- integer(nrow(etiquettes))
+    positions_valides <- !is.na(positions_compteur)
+    etiquettes$nombre_reimpressions[positions_valides] <- as.integer(
+      compteurs$nombre_reimpressions[positions_compteur[positions_valides]])
+    etiquettes$nombre_reimpressions[is.na(etiquettes$nombre_reimpressions)] <- 0L
+    dernieres_etiquettes(etiquettes)
     choix_reimpression <- lapply(seq_len(nrow(etiquettes)), function(i) {
       analyse_txt <- ifelse(
         is.na(etiquettes$analyses[i]) || !nzchar(etiquettes$analyses[i]),
@@ -20234,7 +21001,10 @@ setTimeout(async function(){
           specimen_txt,
           " — Analyses : ",
           analyse_txt,
-          if (nzchar(tube_txt)) paste0(" — Tube : ", tube_txt) else ""
+          if (nzchar(tube_txt)) paste0(" — Tube : ", tube_txt) else "",
+          " — ", if (etiquettes$nombre_reimpressions[i] > 0L)
+            paste0("DÉJÀ RÉIMPRIMÉE ",etiquettes$nombre_reimpressions[i]," fois")
+          else "JAMAIS RÉIMPRIMÉE"
         ),
         value = TRUE
       )
@@ -20243,7 +21013,8 @@ setTimeout(async function(){
     showModal(
       modalDialog(
         title = paste("Réimpression - Req", numero_req),
-
+        actionButton("ouvrir_reimpression_groupee","Sélectionner plusieurs patients (planche partagée)",class="btn-info"),
+        hr(),
         div(
           class = "info-box",
           strong("Choisir les étiquettes à réimprimer : "),
@@ -20371,6 +21142,7 @@ setTimeout(async function(){
         utilisateur_id = utilisateur_connecte()$id
       )
 
+      enregistrer_reimpressions(con,etiquettes[indices,,drop=FALSE],utilisateur_connecte()$id)
       dernier_pdf_reimpression(chemin_pdf)
 
       showNotification(
