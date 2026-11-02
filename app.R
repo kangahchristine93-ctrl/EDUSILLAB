@@ -465,13 +465,26 @@ date_locale_edusillab <- function() {
   as.Date(format(Sys.time(), tz = edusillab_timezone, format = "%Y-%m-%d"))
 }
 
+# Cache des colonnes pendant l'initialisation uniquement : évite une requête
+# information_schema distante pour chaque colonne à vérifier sur Neon.
+# Désactivé avant l'ouverture aux utilisateurs pour éviter les données périmées.
+edusillab_cache_schema_actif <- TRUE
+edusillab_cache_schema <- new.env(parent=emptyenv())
 sql_colonnes <- function(con, table) {
   if (inherits(con, "PqConnection")) {
-    return(db_query(
+    cle <- paste0("pg:", table)
+    if (isTRUE(edusillab_cache_schema_actif) &&
+        exists(cle, envir=edusillab_cache_schema, inherits=FALSE)) {
+      return(get(cle, envir=edusillab_cache_schema, inherits=FALSE))
+    }
+    colonnes <- db_query(
       con,
       "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? ORDER BY ordinal_position",
       params = list(table)
-    )$column_name)
+    )$column_name
+    if (isTRUE(edusillab_cache_schema_actif))
+      assign(cle, colonnes, envir=edusillab_cache_schema)
+    return(colonnes)
   }
   db_query(con, paste0("PRAGMA table_info(", table, ")"))$name
 }
@@ -482,6 +495,14 @@ ajouter_colonne_si_absente <- function(con, table, colonne, definition) {
       "ALTER TABLE", table,
       "ADD COLUMN", colonne, definition
     ))
+    # Mise à jour du cache seulement après succès de la migration.
+    cle <- paste0("pg:", table)
+    if (inherits(con, "PqConnection") &&
+        isTRUE(edusillab_cache_schema_actif) &&
+        exists(cle, envir=edusillab_cache_schema, inherits=FALSE)) {
+      assign(cle, c(get(cle, envir=edusillab_cache_schema), colonne),
+             envir=edusillab_cache_schema)
+    }
   }
 }
 
@@ -770,15 +791,23 @@ creer_pdf_etiquettes <- function(
 # Mise en page universelle, en millimetres; chaque imprimante possede ses champs.
 edusillab_legacy_pdf_etiquettes <- creer_pdf_etiquettes
 edusillab_champs_defaut <- function() {
-  champs <- c("code_barre","code","specimen","dossier","patient","naissance","sexe","medicare","location","tubes","contenant","analyses","requisition","saisie","date","signature")
-  data.frame(champ=champs,
-    x_mm=c(3,40,3,53,3,72,3,53,3,50,3,65,3,3,63,3),
-    y_mm=c(3,14,19,19,24,24,30,30,36,36,42,48,48,53,53,58),
-    largeur_mm=c(94,40,48,44,65,25,46,44,45,47,94,32,61,58,34,40),
-    hauteur_mm=c(10,4,4,4,5,4,4,4,4,4,5,3,3,3,3,4),
-    taille_pt=c(9,8,8,8,9,7,7,7,7,7,8,6,6,6,6,7),
-    visible=as.integer(champs!="naissance"),gras=0L,alignement="gauche",stringsAsFactors=FALSE)
+  # Gabarit de reference 66,75 x 26 mm. Les reglages deja sauvegardes
+  # pour chaque imprimante dans etiquette_champs_mm restent prioritaires.
+  champs <- c("code_barre","code","dossier","patient","naissance","medicare",
+              "sexe","tubes","contenant","analyses","date","signature",
+              "specimen","location","requisition","saisie")
+  data.frame(
+    champ=champs,
+    x_mm=c(3,3,30,3,38,3,38,3,30,3,3,40,3,3,3,3),
+    y_mm=c(1,6,6,9,9,12,12,15,15,18,21.5,21.5,1,1,1,1),
+    largeur_mm=c(55,25,28,34,20,34,20,24,28,55,35,18,20,20,20,20),
+    hauteur_mm=c(5,2.5,2.5,3,3,2.5,2.5,2.5,2.5,3,2.5,2.5,2,2,2,2),
+    taille_pt=c(7,6,6,8,6,6,6,6,6,7,5,5,6,6,6,6),
+    visible=as.integer(champs %in% c("code_barre","code","dossier","patient",
+      "naissance","medicare","sexe","tubes","contenant","analyses","date","signature")),
+    gras=0L,alignement="gauche",stringsAsFactors=FALSE)
 }
+
 edusillab_champs_personnalises <- function(con,imprimante_id) {
   tryCatch({
     db_execute(con,"CREATE TABLE IF NOT EXISTS etiquette_textes_libres (imprimante_id INTEGER NOT NULL, champ TEXT NOT NULL, libelle TEXT NOT NULL, PRIMARY KEY(imprimante_id,champ))")
@@ -913,7 +942,10 @@ creer_pdf_etiquettes_selection <- function(
 # 1. INITIALISATION DE LA BASE
 # ============================================================
 
+edusillab_demarrage_t0 <- Sys.time()
 con <- ouvrir_db()
+message("EDUSILLAB PERF : connexion Neon/SQLite ",
+        round(as.numeric(difftime(Sys.time(),edusillab_demarrage_t0,units="secs")),2)," s")
 
 # Diagnostic de démarrage : confirme que l'application lit bien la base contenant les données.
 if (est_postgres(con)) {
@@ -4933,6 +4965,12 @@ initialiser_microbiologie <- function(con) {
 micro_audit <- function(con, travail_id, utilisateur_id, action, details='') {
   try(db_execute(con,"INSERT INTO micro_journal (travail_id,utilisateur_id,action,details,date_action) VALUES (?,?,?,?,?)",params=list(as.character(travail_id),as.character(utilisateur_id),action,details,format(Sys.time(),tz='America/Moncton',usetz=TRUE))),silent=TRUE)
 }
+
+# Ne conserver aucun cache de schéma pendant l'utilisation de l'application.
+edusillab_cache_schema_actif <- FALSE
+rm(list=ls(envir=edusillab_cache_schema), envir=edusillab_cache_schema)
+message("EDUSILLAB PERF : initialisation avant interface ",
+        round(as.numeric(difftime(Sys.time(),edusillab_demarrage_t0,units="secs")),2)," s")
 
 server <- function(input, output, session) {
 
@@ -12517,6 +12555,7 @@ server <- function(input, output, session) {
     nums<-as.numeric(c(input$mat_champ_x,input$mat_champ_y,input$mat_champ_w,input$mat_champ_h,input$mat_champ_pt))
     if(any(!is.finite(nums))||any(nums[3:5]<=0)){showNotification("Dimensions ou taille invalides",type="error");return()}
     db_execute(con,"INSERT INTO etiquette_champs_mm(imprimante_id,champ,x_mm,y_mm,largeur_mm,hauteur_mm,taille_pt,visible,gras,alignement) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(imprimante_id,champ) DO UPDATE SET x_mm=excluded.x_mm,y_mm=excluded.y_mm,largeur_mm=excluded.largeur_mm,hauteur_mm=excluded.hauteur_mm,taille_pt=excluded.taille_pt,visible=excluded.visible,gras=excluded.gras,alignement=excluded.alignement",params=c(list(id,input$mat_champ_layout),as.list(nums),list(as.integer(isTRUE(input$mat_champ_visible)),as.integer(isTRUE(input$mat_champ_gras)),input$mat_champ_align)))
+    mat_custom_refresh(mat_custom_refresh()+1L)
     showNotification("Disposition du champ enregistree",type="message")
   })
 
@@ -17919,9 +17958,24 @@ setTimeout(async function(){
       params=list(a$id[1])
     )
 
-    if (nrow(src)==0) {
+    # Pour la microbiologie, la provenance est obligatoire même si le
+    # dictionnaire ne contient encore aucune source pour cette analyse.
+    px_micro <- toupper(trimws(as.character(a$px[1] %||% "")))
+    dep_micro <- toupper(trimws(as.character(a$departement[1] %||% "")))
+    est_micro <- px_micro %in% c("M","MM","MS","MT","TB","PA","MY","VC","CL") ||
+      grepl("MICROBIO|MYCOBACT|PARASITO|MYCOLOG|VIROLOG|CHLAMYDIA",dep_micro)
+    if (nrow(src)==0 && !est_micro) {
       ajouter_analyse_order_final(a)
       return()
+    }
+    if (est_micro) {
+      sources_usuelle <- c("Gorge", "Nez", "Nasopharynx", "Oreille droite",
+        "Oreille gauche", "Oeil droit", "Oeil gauche", "Plaie", "Peau",
+        "Urine", "Selles", "Expectorations", "Vagin", "Col uterin",
+        "Uretre", "Rectum", "Sang", "Liquide biologique")
+      ajouts <- setdiff(sources_usuelle, as.character(src$source_nom))
+      if (length(ajouts)) src <- rbind(src, data.frame(source_nom=ajouts,
+        categorie=rep("",length(ajouts)),stringsAsFactors=FALSE))
     }
 
     session$userData$analyse_source_en_attente <- a
@@ -18445,6 +18499,11 @@ setTimeout(async function(){
         norm_txt(infos_tests$source_autre),
         norm_txt(infos_tests$source_prelevement)
       )
+      # Une provenance est une partie de l'identité du prélèvement.
+      # Uniformiser les espaces et la casse pour réunir les mêmes sites,
+      # tout en gardant des sites différents sur des étiquettes distinctes.
+      source_effective <- gsub("[[:space:]]+", " ", trimws(source_effective))
+      source_cle <- toupper(source_effective)
       cle_groupes <- paste(
         ifelse(nzchar(infos_tests$departement), infos_tests$departement, "SANS DEPARTEMENT"),
         ifelse(nzchar(source_effective), source_effective, "SANS SOURCE"),
@@ -18486,7 +18545,7 @@ setTimeout(async function(){
       for(i in seq_len(nrow(infos_tests))) {
         spec <- besoins[besoins$analyse_id==infos_tests$id[i],,drop=FALSE]
         for(j in seq_len(nrow(spec))) {
-          cle <- paste(px_groupes[i],ifelse(nzchar(source_effective[i]),source_effective[i],"SANS SOURCE"),
+          cle <- paste(px_groupes[i],ifelse(nzchar(source_cle[i]),source_cle[i],"SANS SOURCE"),
                        normaliser_tube_etiquette(spec$couleur[j]),sep="|||")
           if(is.null(groupes[[cle]])) groupes[[cle]] <- list()
           groupes[[cle]][[length(groupes[[cle]])+1L]] <- list(ligne=infos_tests[i,,drop=FALSE],
@@ -18516,6 +18575,13 @@ setTimeout(async function(){
         source_label <- if(length(source_effective_gd)) source_effective_gd[1] else ""
         location_label <- norm_txt(input$req_location)
         if(!nzchar(location_label)) location_label <- "NON PRECISEE"
+        # Sur les étiquettes microbiologiques, LOC représente le site de
+        # prélèvement, pas la localisation administrative du patient.
+        px_micro_groupe <- toupper(trimws(as.character(px_label)))
+        dep_micro_groupe <- toupper(trimws(as.character(dep)))
+        est_micro_groupe <- px_micro_groupe %in% c("M","MM","MS","MT","TB","PA","MY","VC","CL") ||
+          grepl("MICROBIO|MYCOBACT|PARASITO|MYCOLOG|VIROLOG|CHLAMYDIA",dep_micro_groupe)
+        if(est_micro_groupe && nzchar(source_label)) location_label <- source_label
         # Chaque analyse est présente sur les N tubes exigés pour sa couleur.
         # Répartition additionnelle si plus de neuf analyses sur une étiquette.
         for(tube_i in seq_len(nombre_tubes)) {
@@ -20572,6 +20638,16 @@ setTimeout(async function(){
              "onclick=\"Shiny.setInputValue('modifier_req_historique', %s, {priority:'event'})\">",
              "Consulter / Ajouter des tests</button>"), d$requisition_id
     )
+    d[["Origine du prélèvement"]] <- sprintf(
+      paste0("<button class='btn btn-info btn-xs' ",
+        "onclick=\"Shiny.setInputValue('hist_modifier_sources', %s, {priority:'event'})\">",
+        "Modifier location</button>"), d$requisition_id
+    )
+    d[["Médecin / location patient"]] <- sprintf(
+      paste0("<button class='btn btn-info btn-xs' ",
+        "onclick=\"Shiny.setInputValue('hist_modifier_entete', %s, {priority:'event'})\">",
+        "Corriger médecin / location</button>"), d$requisition_id
+    )
     d[["Étiquette"]] <- sprintf(
       paste0(
         "<button class='btn btn-primary btn-xs' ",
@@ -20769,6 +20845,144 @@ setTimeout(async function(){
     if(!is.null(erreur)) return(showNotification(paste("Ajout impossible :",erreur),type="error",duration=12))
     removeModal();requisition_en_edition(NULL);charger_historique()
     showNotification("Analyses ajoutées. Utilisez Réimprimer pour les nouvelles étiquettes.",type="message",duration=8)
+  })
+
+  # Corrections de l'en-tête d'une réquisition existante : médecin et
+  # location du patient / service. Aucun code-barres n'est régénéré.
+  hist_entete_req <- reactiveVal(NULL)
+  observeEvent(input$hist_modifier_entete, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    rid <- suppressWarnings(as.integer(input$hist_modifier_entete))
+    req(length(rid)==1L, !is.na(rid))
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"SELECT id,COALESCE(prescripteur,'') AS prescripteur FROM requisitions WHERE id=? AND UPPER(COALESCE(statut,'')) NOT IN ('ANNULEE','ANNULE')",params=list(rid))
+    if(nrow(d)!=1L) return(showNotification("Réquisition introuvable ou annulée.",type="error"))
+    loc <- db_query(con,"SELECT DISTINCT COALESCE(location,'') AS location FROM specimens WHERE requisition_id=? ORDER BY location",params=list(rid))
+    meds <- db_query(con,"SELECT DISTINCT nom FROM repertoire_medecins WHERE actif=1 AND TRIM(nom)<>'' ORDER BY nom")
+    med <- norm_txt(d$prescripteur[1]); options <- unique(c(as.character(meds$nom),med))
+    options <- options[nzchar(options)]
+    locs <- unique(norm_txt(loc$location));locs <- locs[nzchar(locs)]
+    hist_entete_req(rid)
+    showModal(modalDialog(
+      title=paste("Corriger la réquisition",rid),
+      selectizeInput("hist_entete_med","Médecin prescripteur",choices=c("Aucun"="",setNames(options,options)),selected=med,
+        options=list(create=TRUE,placeholder="Choisir ou saisir un médecin")),
+      p("Location du patient / service : cette information est distincte de l'origine anatomique du prélèvement."),
+      textInput("hist_entete_location","Location du patient / service",value=if(length(locs)==1L) locs[1] else "",
+        placeholder="Ex. Urgence, unité 3B, clinique externe"),
+      if(length(locs)>1L) p(class="text-warning",paste("Locations actuelles différentes :",paste(locs,collapse=" ; "),". Ne pas les remplacer si elles désignent des sites de prélèvement différents.")),
+      checkboxInput("hist_entete_remplacer_location","Appliquer cette location à tous les spécimens de la réquisition",value=FALSE),
+      p(class="text-muted","Pour modifier l'origine de prélèvement d'une analyse, utiliser Modifier location dans Historique."),
+      footer=tagList(modalButton("Annuler"),actionButton("hist_entete_sauver","Enregistrer",class="btn-primary")),size="l",easyClose=FALSE
+    ))
+  })
+  observeEvent(input$hist_entete_sauver, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    rid <- hist_entete_req();req(!is.null(rid))
+    med <- norm_txt(input$hist_entete_med)
+    loc <- norm_txt(input$hist_entete_location)
+    if(isTRUE(input$hist_entete_remplacer_location) && !nzchar(loc))
+      return(showNotification("Précisez la location à appliquer.",type="error"))
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    erreur <- NULL
+    tryCatch({
+      db_begin_retry(con)
+      db_execute(con,"UPDATE requisitions SET prescripteur=? WHERE id=?",params=list(med,rid))
+      if(isTRUE(input$hist_entete_remplacer_location))
+        db_execute(con,"UPDATE specimens SET location=? WHERE requisition_id=?",params=list(loc,rid))
+      db_commit_retry(con)
+    },error=function(e){erreur <<- conditionMessage(e);try(DBI::dbRollback(con),silent=TRUE)})
+    if(!is.null(erreur)) return(showNotification(paste("Erreur :",erreur),type="error",duration=12))
+    removeModal();charger_historique()
+    showNotification("Correction enregistrée. Vérifiez les étiquettes avant réimpression.",type="message")
+  })
+
+  # Modification de la provenance sur une requisition existante.
+  # Ne recree jamais un specimen ni son code-barres automatiquement.
+  source_historique_req <- reactiveVal(NULL)
+
+  observeEvent(input$hist_modifier_sources, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    rid <- suppressWarnings(as.integer(input$hist_modifier_sources))
+    req(length(rid)==1L, !is.na(rid))
+    source_historique_req(rid)
+    con <- ouvrir_db(); on.exit(DBI::dbDisconnect(con),add=TRUE)
+    tests <- db_query(con, paste0(
+      "SELECT ra.analyse_id,a.mnemonique,a.nom,",
+      "COALESCE(ra.source_prelevement,'') AS source_prelevement,",
+      "COALESCE(ra.source_autre,'') AS source_autre ",
+      "FROM requisition_analyses ra JOIN analyses a ON a.id=ra.analyse_id ",
+      "WHERE ra.requisition_id=? ORDER BY a.mnemonique"),params=list(rid))
+    if(!nrow(tests)) return(showNotification("Aucune analyse dans cette requisition.",type="warning"))
+    choix <- setNames(as.character(tests$analyse_id),paste0(tests$mnemonique," — ",tests$nom))
+    showModal(modalDialog(
+      title="Modifier l'origine du prelevement — Historique",
+      selectInput("hist_source_analyse","Analyse",choices=choix),
+      uiOutput("hist_source_champs"),
+      p(class="text-muted","Les choix proviennent du dictionnaire d'analyses. Les codes-barres existants ne sont pas modifies."),
+      footer=tagList(modalButton("Annuler"),actionButton("hist_source_enregistrer","Enregistrer la provenance",class="btn-primary")),
+      size="l",easyClose=FALSE
+    ))
+  })
+
+  output$hist_source_champs <- renderUI({
+    rid <- source_historique_req(); aid <- suppressWarnings(as.integer(input$hist_source_analyse))
+    req(!is.null(rid),length(aid)==1L,!is.na(aid))
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    d <- db_query(con,"SELECT COALESCE(source_prelevement,'') AS source_prelevement,COALESCE(source_autre,'') AS source_autre FROM requisition_analyses WHERE requisition_id=? AND analyse_id=?",params=list(rid,aid))
+    src <- db_query(con,"SELECT DISTINCT COALESCE(source_nom,'') AS source_nom,COALESCE(categorie,'') AS categorie FROM analyse_sources WHERE analyse_id=? AND TRIM(COALESCE(source_nom,''))<>'' ORDER BY categorie,source_nom",params=list(aid))
+    # Catalogue complet des locations du dictionnaire, y compris celles
+    # rattachées à d'autres analyses. Les options de l'analyse restent en tête.
+    toutes_sources <- db_query(con,"SELECT DISTINCT TRIM(source_nom) AS source_nom FROM analyse_sources WHERE TRIM(COALESCE(source_nom,''))<>'' ORDER BY source_nom")
+    vals_globales <- setdiff(as.character(toutes_sources$source_nom),as.character(src$source_nom))
+    vals <- unique(as.character(src$source_nom))
+    lib <- if(nrow(src)) ifelse(nzchar(src$categorie),paste0(src$source_nom," — ",src$categorie),src$source_nom) else character()
+    choix <- c(setNames(vals,lib),setNames(vals_globales,paste0(vals_globales," — autre analyse du dictionnaire")),
+      "Autre — preciser manuellement"="AUTRE")
+    ancien <- if(nrow(d)) norm_txt(d$source_prelevement[1]) else ""
+    autre <- if(nrow(d)) norm_txt(d$source_autre[1]) else ""
+    if(nzchar(ancien) && !ancien %in% c(vals,"AUTRE")) {
+      choix <- c(setNames(ancien,paste0(ancien," (valeur existante)")),choix)
+    }
+    tagList(
+      selectInput("hist_source_selection","Origine / location du prelevement",choices=c("Choisir..."="",choix),selected=ancien),
+      conditionalPanel(condition="input.hist_source_selection == 'AUTRE'",
+        textInput("hist_source_autre","Autre — preciser",value=autre,placeholder="Ex. plaie du pied droit")),
+      p(class="text-muted",if(nzchar(ancien)) paste("Origine actuelle :",if(ancien=="AUTRE") autre else ancien) else "Aucune origine enregistree")
+    )
+  })
+
+  observeEvent(input$hist_source_enregistrer, {
+    req(utilisateur_connecte()$perm_historique == 1)
+    rid <- source_historique_req();aid <- suppressWarnings(as.integer(input$hist_source_analyse))
+    req(!is.null(rid),length(aid)==1L,!is.na(aid))
+    src <- norm_txt(input$hist_source_selection)
+    autre <- norm_txt(input$hist_source_autre)
+    if(!nzchar(src) || (src=="AUTRE" && !nzchar(autre)))
+      return(showNotification("Choisissez une origine ou precisez Autre.",type="error"))
+    origine <- if(src=="AUTRE") autre else src
+    con <- ouvrir_db();on.exit(DBI::dbDisconnect(con),add=TRUE)
+    erreur <- NULL; ambigus <- FALSE
+    tryCatch({
+      db_begin_retry(con)
+      db_execute(con,"UPDATE requisition_analyses SET source_prelevement=?,source_autre=? WHERE requisition_id=? AND analyse_id=?",params=list(src,if(src=="AUTRE") autre else "",rid,aid))
+      # Actualiser uniquement les specimens lies exclusivement a cette origine.
+      specs <- db_query(con,"SELECT s.id,s.source_prelevement,s.location FROM specimens s JOIN specimen_analyses sa ON sa.specimen_id=s.id WHERE sa.requisition_id=? AND sa.analyse_id=?",params=list(rid,aid))
+      if(nrow(specs)) for(sid in unique(specs$id)) {
+        autres <- db_query(con,paste0("SELECT COALESCE(ra.source_prelevement,'') AS src,COALESCE(ra.source_autre,'') AS autre ",
+          "FROM specimen_analyses sa JOIN requisition_analyses ra ON ra.requisition_id=sa.requisition_id AND ra.analyse_id=sa.analyse_id ",
+          "WHERE sa.specimen_id=?"),params=list(sid))
+        origines <- ifelse(toupper(trimws(autres$src))=="AUTRE",trimws(autres$autre),trimws(autres$src))
+        if(length(unique(toupper(origines)))==1L && nzchar(origine)) {
+          db_execute(con,"UPDATE specimens SET source_prelevement=?,location=? WHERE id=?",params=list(origine,origine,sid))
+        } else ambigus <- TRUE
+      }
+      db_commit_retry(con)
+    },error=function(e){erreur <<- conditionMessage(e);try(DBI::dbRollback(con),silent=TRUE)})
+    if(!is.null(erreur)) return(showNotification(paste("Modification impossible :",erreur),type="error",duration=12))
+    removeModal();charger_historique()
+    if(ambigus) showNotification("Provenance enregistree. Attention : un specimen contient plusieurs origines. Son etiquette existante n'a pas ete modifiee; il faut corriger son regroupement avant reimpression.",type="warning",duration=NULL)
+    else showNotification("Origine enregistree. Vous pouvez reimprimer l'etiquette depuis Historique.",type="message",duration=9)
   })
 
   # ----------------------------------------------------------
